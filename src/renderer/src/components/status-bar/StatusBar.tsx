@@ -2,7 +2,6 @@
 interaction menus, and compact-layout behavior together so the hover/click
 states stay consistent across Claude and Codex. */
 import {
-  AlertTriangle,
   Activity,
   RotateCcw,
   Plug,
@@ -35,6 +34,7 @@ import {
   DropdownMenuSeparator,
   DropdownMenuTrigger
 } from '@/components/ui/dropdown-menu'
+import type { Menu as DropdownMenuPrimitive } from '@base-ui/react/menu'
 import { useAppStore } from '../../store'
 import { selectFloatingWorkspaceHasUnread } from '../../store/selectors'
 import type {
@@ -44,20 +44,11 @@ import type {
 } from '../../../../shared/types'
 import type {
   ProviderRateLimits,
-  RateLimitRuntimeTarget,
-  RateLimitWindow
+  RateLimitRuntimeTarget
 } from '../../../../shared/rate-limit-types'
-import {
-  ProviderIcon,
-  ProviderPanel,
-  barColor,
-  clampUsedPercent,
-  formatResetCreditExpiry,
-  getProviderUsageStatusLabel
-} from './tooltip'
+import { ProviderPanel, barColor, clampUsedPercent, formatResetCreditExpiry } from './tooltip'
 import { ClaudeIcon, GeminiIcon, MiniMaxIcon, OpenAIIcon, OpenCodeGoIcon } from './icons'
 import { AgentIcon } from '@/lib/agent-catalog'
-import { formatWindowLabel } from '@/lib/window-label-formatter'
 import { markLiveCodexSessionsForRestart } from '@/lib/codex-session-restart'
 import { UpdateStatusSegment } from './UpdateStatusSegment'
 import { isStatusBarItemAvailable } from './status-bar-agent-gating'
@@ -82,10 +73,10 @@ import {
 import { translate } from '@/i18n/i18n'
 import {
   getDisplayedUsagePercentage,
-  normalizeUsagePercentageDisplay,
-  type UsagePercentageDisplay
+  normalizeUsagePercentageDisplay
 } from '../../../../shared/usage-percentage-display'
 import { formatUsagePercentageLabel } from './usage-percentage-label'
+import { ProviderUsageSegment } from './ProviderUsageSegment'
 
 type StatusBarProps = {
   floatingTerminalOpen: boolean
@@ -855,10 +846,11 @@ function ClaudeSwitcherMenu({
         {translate('auto.components.status.bar.StatusBar.d450654fa2', 'Claude Account')}
       </DropdownMenuLabel>
       <DropdownMenuItem
-        onSelect={(event) => {
+        onClick={(event) => {
           event.preventDefault()
           handleAccountsExpandedToggle()
         }}
+        closeOnClick={false}
       >
         <span className="max-w-[180px] truncate text-[12px] text-foreground">
           {activeTarget?.label ??
@@ -890,12 +882,13 @@ function ClaudeSwitcherMenu({
                 <DropdownMenuItem
                   key={`${selectedGroup.key}:${target.id ?? 'system'}`}
                   disabled={isSwitching || target.active}
-                  onSelect={(event) => {
+                  onClick={(event) => {
                     event.preventDefault()
                     if (!target.active) {
                       void handleSelectAccount(target.id, target.runtimeTarget)
                     }
                   }}
+                  closeOnClick={false}
                 >
                   <div className="flex w-full flex-col gap-0.5">
                     <div className="flex min-w-0 items-center gap-2">
@@ -929,7 +922,7 @@ function ClaudeSwitcherMenu({
       ) : null}
       <DropdownMenuSeparator />
       <DropdownMenuItem
-        onSelect={() => {
+        onClick={() => {
           openSettingsTarget({
             pane: 'accounts',
             repoId: null,
@@ -941,27 +934,6 @@ function ClaudeSwitcherMenu({
         {translate('auto.components.status.bar.StatusBar.75ded02687', 'Manage Accounts…')}
       </DropdownMenuItem>
     </ProviderDetailsMenu>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Mini progress bar (follows the selected usage percentage meaning, grey)
-// ---------------------------------------------------------------------------
-
-function MiniBar({
-  usedPct,
-  display
-}: {
-  usedPct: number
-  display: UsagePercentageDisplay
-}): React.JSX.Element {
-  return (
-    <div className="w-[48px] h-[6px] rounded-full bg-muted overflow-hidden flex-shrink-0">
-      <div
-        className="h-full rounded-full transition-all duration-300 bg-muted-foreground/40"
-        style={{ width: `${getDisplayedUsagePercentage(usedPct, display)}%` }}
-      />
-    </div>
   )
 }
 
@@ -1089,165 +1061,6 @@ function InlineUsageSkeleton(): React.JSX.Element {
       <div className="h-[4px] flex-1 rounded-full bg-muted" />
       <div className="h-[4px] flex-1 rounded-full bg-muted" />
     </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Window label
-// ---------------------------------------------------------------------------
-
-function WindowLabel({
-  w,
-  label,
-  display
-}: {
-  w: RateLimitWindow
-  label: string
-  display: UsagePercentageDisplay
-}): React.JSX.Element {
-  return (
-    <span className="tabular-nums">
-      {formatUsagePercentageLabel(w.usedPercent, display)} {label}
-    </span>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Provider segment
-// ---------------------------------------------------------------------------
-
-// Why: only Flash and the latest Pro are shown in the status bar —
-// the rest (Flash Lite, experimental) are secondary and would clutter the bar.
-const STATUS_BAR_BUCKET_NAMES = new Set(['Flash', 'Pro', '1.5 Pro'])
-
-export function ProviderSegment({
-  p,
-  compact,
-  display
-}: {
-  p: ProviderRateLimits | null
-  compact: boolean
-  display: UsagePercentageDisplay
-}): React.JSX.Element {
-  const provider = p?.provider ?? 'claude'
-  const statusLabel = p ? getProviderUsageStatusLabel(p) : ''
-
-  // Idle / initial load
-  if (!p || p.status === 'idle') {
-    return (
-      <span className="inline-flex items-center gap-1 text-muted-foreground">
-        <ProviderIcon provider={provider} />
-        <span className="animate-pulse">···</span>
-      </span>
-    )
-  }
-
-  // Fetching with no prior data
-  if (p.status === 'fetching' && !p.session && !p.weekly && !p.fableWeekly && !p.monthly) {
-    return (
-      <span className="inline-flex items-center gap-1 text-muted-foreground">
-        <ProviderIcon provider={provider} />
-        <span className="animate-pulse">···</span>
-      </span>
-    )
-  }
-
-  // Unavailable (CLI not installed)
-  if (p.status === 'unavailable') {
-    return (
-      <span className="inline-flex items-center gap-1 text-muted-foreground/50">
-        <ProviderIcon provider={provider} /> --
-      </span>
-    )
-  }
-
-  // Error with no data
-  if (p.status === 'error' && !p.session && !p.weekly && !p.fableWeekly && !p.monthly) {
-    return (
-      <span className="inline-flex items-center gap-1 text-muted-foreground">
-        <ProviderIcon provider={provider} />
-        <AlertTriangle size={11} className="text-muted-foreground/80" />
-        {!compact && <span className="text-[11px] font-medium">{statusLabel}</span>}
-      </span>
-    )
-  }
-
-  // Has data (ok, fetching with stale data, or error with stale data)
-  const isStale = p.status === 'error'
-
-  if (p.buckets && p.buckets.length > 0) {
-    const visibleBuckets = p.buckets.filter((b) => STATUS_BAR_BUCKET_NAMES.has(b.name))
-    return (
-      <span className="inline-flex items-center gap-1.5">
-        <ProviderIcon provider={provider} />
-        {visibleBuckets.map((bucket, i) => (
-          <React.Fragment key={bucket.name}>
-            {i > 0 && <span className="text-muted-foreground">·</span>}
-            <span className="tabular-nums">
-              {bucket.name} {formatUsagePercentageLabel(bucket.usedPercent, display)}
-            </span>
-          </React.Fragment>
-        ))}
-        {visibleBuckets.length === 0 && p.session && (
-          <WindowLabel
-            w={p.session}
-            label={formatWindowLabel(p.session.windowMinutes)}
-            display={display}
-          />
-        )}
-        {isStale && <AlertTriangle size={11} className="text-muted-foreground/80" />}
-      </span>
-    )
-  }
-
-  const visibleWindows = [
-    p.session
-      ? {
-          key: 'session',
-          window: p.session,
-          label: formatWindowLabel(p.session.windowMinutes)
-        }
-      : null,
-    p.weekly
-      ? {
-          key: 'weekly',
-          window: p.weekly,
-          label: formatWindowLabel(p.weekly.windowMinutes)
-        }
-      : null,
-    p.fableWeekly
-      ? {
-          key: 'fableWeekly',
-          window: p.fableWeekly,
-          label: translate('auto.components.status.bar.StatusBar.a79c64f87e', 'Fable')
-        }
-      : null,
-    // Why: monthly is chip-visible only when it's the sole window (Grok
-    // unified billing); providers with session/weekly data (OpenCode Go)
-    // keep monthly tooltip-only so the chip stays uncluttered.
-    p.monthly && !p.session && !p.weekly
-      ? {
-          key: 'monthly',
-          window: p.monthly,
-          label: formatWindowLabel(p.monthly.windowMinutes)
-        }
-      : null
-  ].filter((w): w is { key: string; window: RateLimitWindow; label: string } => w !== null)
-
-  return (
-    <span className="inline-flex items-center gap-1.5">
-      <ProviderIcon provider={provider} />
-      {p.session && !compact && (
-        <MiniBar usedPct={clampUsedPercent(p.session.usedPercent)} display={display} />
-      )}
-      {visibleWindows.map((window, index) => (
-        <React.Fragment key={window.key}>
-          {index > 0 && <span className="text-muted-foreground">·</span>}
-          <WindowLabel w={window.window} label={window.label} display={display} />
-        </React.Fragment>
-      ))}
-      {isStale && <AlertTriangle size={11} className="text-muted-foreground/80" />}
-    </span>
   )
 }
 
@@ -1618,10 +1431,11 @@ function CodexSwitcherMenu({
           {canRedeemReset ? (
             <DropdownMenuItem
               disabled={isRedeemingReset}
-              onSelect={(event) => {
+              onClick={(event) => {
                 event.preventDefault()
                 handleResetMenuSelect()
               }}
+              closeOnClick={false}
             >
               {isRedeemingReset ? (
                 <Loader2 className="size-3.5 animate-spin text-muted-foreground" />
@@ -1638,10 +1452,11 @@ function CodexSwitcherMenu({
         {translate('auto.components.status.bar.StatusBar.7657e3db9c', 'Codex Account')}
       </DropdownMenuLabel>
       <DropdownMenuItem
-        onSelect={(event) => {
+        onClick={(event) => {
           event.preventDefault()
           handleAccountsExpandedToggle()
         }}
+        closeOnClick={false}
       >
         <div className="flex min-w-0 flex-1 flex-col gap-0.5 py-0.5 text-[12px]">
           <div className="flex min-w-0 items-center gap-1.5">
@@ -1679,7 +1494,7 @@ function CodexSwitcherMenu({
                   return (
                     <DropdownMenuItem
                       key={`${selectedGroup.key}:${target.id ?? 'system'}`}
-                      onSelect={(event) => {
+                      onClick={(event) => {
                         // Why: account switching may need an immediate follow-up
                         // restart action for live Codex tabs. Prevent the menu from
                         // auto-closing so that prompt can stay within the same
@@ -1694,6 +1509,7 @@ function CodexSwitcherMenu({
                         }
                       }}
                       disabled={isBusy || target.active}
+                      closeOnClick={false}
                     >
                       <div className="flex w-full min-w-0 flex-col gap-0.5">
                         <div className="flex min-w-0 items-center gap-2">
@@ -1740,7 +1556,7 @@ function CodexSwitcherMenu({
       {open ? <CodexRestartStatusPrompt /> : null}
       <DropdownMenuSeparator />
       <DropdownMenuItem
-        onSelect={() => {
+        onClick={() => {
           openSettingsTarget({
             pane: 'accounts',
             repoId: null,
@@ -1782,66 +1598,76 @@ export function ProviderDetailsMenu({
   )
   const skipCloseAutoFocusRef = useRef(false)
 
-  const handleOpenChange = (nextOpen: boolean): void => {
+  const handleOpenChange = (
+    nextOpen: boolean,
+    eventDetails: DropdownMenuPrimitive.Root.ChangeEventDetails
+  ): void => {
     if (nextOpen) {
       skipCloseAutoFocusRef.current = false
       recordFeatureInteraction('usage-tracking')
+    } else if (eventDetails.reason === 'outside-press') {
+      // Why: click-away should focus the clicked surface (esp. xterm); flag the
+      // close so finalFocus skips the default trigger restore below.
+      skipCloseAutoFocusRef.current = true
     }
     onOpenChange?.(nextOpen)
   }
 
   return (
     <DropdownMenu open={open} onOpenChange={handleOpenChange} modal={false}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="inline-flex items-center cursor-pointer rounded px-1 py-0.5 hover:bg-accent/70"
-          aria-label={ariaLabel}
-        >
-          {iconOnly ? (
-            <span className="inline-flex items-center gap-1">
-              <span
-                className={`inline-block h-2 w-2 rounded-full ${provider.session || provider.weekly || provider.fableWeekly || provider.monthly ? 'bg-muted-foreground/60' : 'bg-muted-foreground/30'}`}
-              />
-              <span className="text-muted-foreground">
-                {provider.provider === 'claude'
-                  ? 'C'
-                  : provider.provider === 'gemini'
-                    ? 'G'
-                    : provider.provider === 'opencode-go'
-                      ? 'O'
-                      : provider.provider === 'kimi'
-                        ? 'K'
-                        : provider.provider === 'antigravity'
-                          ? 'A'
-                          : provider.provider === 'minimax'
-                            ? 'M'
-                            : provider.provider === 'grok'
-                              ? 'R'
-                              : 'X'}
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            className="inline-flex items-center cursor-pointer rounded px-1 py-0.5 hover:bg-accent/70"
+            aria-label={ariaLabel}
+          >
+            {iconOnly ? (
+              <span className="inline-flex items-center gap-1">
+                <span
+                  className={`inline-block h-2 w-2 rounded-full ${provider.session || provider.weekly || provider.fableWeekly || provider.monthly ? 'bg-muted-foreground/60' : 'bg-muted-foreground/30'}`}
+                />
+                <span className="text-muted-foreground">
+                  {provider.provider === 'claude'
+                    ? 'C'
+                    : provider.provider === 'gemini'
+                      ? 'G'
+                      : provider.provider === 'opencode-go'
+                        ? 'O'
+                        : provider.provider === 'kimi'
+                          ? 'K'
+                          : provider.provider === 'antigravity'
+                            ? 'A'
+                            : provider.provider === 'minimax'
+                              ? 'M'
+                              : provider.provider === 'grok'
+                                ? 'R'
+                                : 'X'}
+                </span>
               </span>
-            </span>
-          ) : (
-            <ProviderSegment p={provider} compact={compact} display={usagePercentageDisplay} />
-          )}
-        </button>
-      </DropdownMenuTrigger>
+            ) : (
+              <ProviderUsageSegment
+                limits={provider}
+                compact={compact}
+                display={usagePercentageDisplay}
+              />
+            )}
+          </button>
+        }
+      />
       <DropdownMenuContent
         side="top"
         align="start"
         sideOffset={8}
         className="w-[260px]"
-        onPointerDownOutside={() => {
-          skipCloseAutoFocusRef.current = true
-        }}
-        onCloseAutoFocus={(event) => {
+        finalFocus={() => {
           if (!skipCloseAutoFocusRef.current) {
             return
           }
           skipCloseAutoFocusRef.current = false
           // Why: click-away should focus the clicked surface, especially xterm;
-          // Radix's default trigger restore steals that first click.
-          event.preventDefault()
+          // the default trigger restore steals that first click.
+          return false
         }}
       >
         {topContent}
@@ -2183,22 +2009,24 @@ function StatusBarInner({ floatingTerminalOpen }: StatusBarProps): React.JSX.Ele
         )}
         {anyVisible && !isEmptyUsageState && (
           <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                onClick={handleRefresh}
-                disabled={isRefreshing}
-                className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
-                aria-label={translate(
-                  'auto.components.status.bar.StatusBar.3325d996cb',
-                  'Refresh rate limits'
-                )}
-              >
-                <RefreshCw
-                  size={11}
-                  className={isRefreshing || anyFetching ? 'animate-spin' : ''}
-                />
-              </button>
-            </TooltipTrigger>
+            <TooltipTrigger
+              render={
+                <button
+                  onClick={handleRefresh}
+                  disabled={isRefreshing}
+                  className="p-0.5 rounded hover:bg-accent text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40"
+                  aria-label={translate(
+                    'auto.components.status.bar.StatusBar.3325d996cb',
+                    'Refresh rate limits'
+                  )}
+                >
+                  <RefreshCw
+                    size={11}
+                    className={isRefreshing || anyFetching ? 'animate-spin' : ''}
+                  />
+                </button>
+              }
+            />
             <TooltipContent side="top" sideOffset={6}>
               {translate('auto.components.status.bar.StatusBar.c8857b40f7', 'Refresh usage data')}
             </TooltipContent>
@@ -2221,31 +2049,33 @@ function StatusBarInner({ floatingTerminalOpen }: StatusBarProps): React.JSX.Ele
         {showFloatingTerminalToggle && (
           <FloatingTerminalIconContextMenu currentLocation="status-bar" className="relative">
             <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  type="button"
-                  className="relative inline-flex size-5 cursor-pointer items-center justify-center rounded border border-border bg-secondary text-secondary-foreground shadow-xs transition-colors hover:bg-accent hover:text-accent-foreground"
-                  aria-label={
-                    showFloatingWorkspaceAttentionDot
-                      ? `${floatingTerminalActionLabel}, new activity`
-                      : floatingTerminalActionLabel
-                  }
-                  onClick={() => {
-                    window.dispatchEvent(new CustomEvent(TOGGLE_FLOATING_TERMINAL_EVENT))
-                  }}
-                >
-                  <PanelsTopLeft className="size-3.5" />
-                  {showFloatingWorkspaceAttentionDot ? (
-                    // Why: amber = Orca's "needs attention" convention; ring
-                    // matches the button fill so the dot reads on the icon.
-                    <span
-                      aria-hidden
-                      data-floating-terminal-attention
-                      className="pointer-events-none absolute right-0.5 top-0.5 size-1.5 rounded-full bg-amber-500 ring-1 ring-secondary"
-                    />
-                  ) : null}
-                </button>
-              </TooltipTrigger>
+              <TooltipTrigger
+                render={
+                  <button
+                    type="button"
+                    className="relative inline-flex size-5 cursor-pointer items-center justify-center rounded border border-border bg-secondary text-secondary-foreground shadow-xs transition-colors hover:bg-accent hover:text-accent-foreground"
+                    aria-label={
+                      showFloatingWorkspaceAttentionDot
+                        ? `${floatingTerminalActionLabel}, new activity`
+                        : floatingTerminalActionLabel
+                    }
+                    onClick={() => {
+                      window.dispatchEvent(new CustomEvent(TOGGLE_FLOATING_TERMINAL_EVENT))
+                    }}
+                  >
+                    <PanelsTopLeft className="size-3.5" />
+                    {showFloatingWorkspaceAttentionDot ? (
+                      // Why: amber = Orca's "needs attention" convention; ring
+                      // matches the button fill so the dot reads on the icon.
+                      <span
+                        aria-hidden
+                        data-floating-terminal-attention
+                        className="pointer-events-none absolute right-0.5 top-0.5 size-1.5 rounded-full bg-amber-500 ring-1 ring-secondary"
+                      />
+                    ) : null}
+                  </button>
+                }
+              />
               <TooltipContent side="top" sideOffset={6}>
                 {floatingTerminalActionLabel} ({floatingTerminalShortcut})
               </TooltipContent>
@@ -2255,14 +2085,16 @@ function StatusBarInner({ floatingTerminalOpen }: StatusBarProps): React.JSX.Ele
       </div>
 
       <DropdownMenu open={menuOpen} onOpenChange={setMenuOpen} modal={false}>
-        <DropdownMenuTrigger asChild>
-          <button
-            aria-hidden
-            tabIndex={-1}
-            className="pointer-events-none absolute size-px opacity-0"
-            style={{ left: menuPoint.x, top: menuPoint.y }}
-          />
-        </DropdownMenuTrigger>
+        <DropdownMenuTrigger
+          render={
+            <button
+              aria-hidden
+              tabIndex={-1}
+              className="pointer-events-none absolute size-px opacity-0"
+              style={{ left: menuPoint.x, top: menuPoint.y }}
+            />
+          }
+        />
         <DropdownMenuContent className="min-w-0 w-fit" sideOffset={0} align="start">
           {isStatusBarItemAvailable('claude', detectedAgentIds) && (
             <DropdownMenuCheckboxItem

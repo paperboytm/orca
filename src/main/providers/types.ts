@@ -24,6 +24,10 @@ import type { StartupCommandDelivery } from '../../shared/codex-startup-delivery
 import type { TerminalOscLinkRange } from '../../shared/terminal-osc-link-ranges'
 import type { TerminalGitHubPRLink } from '../../shared/terminal-github-pr-link-detector'
 import type { GitProviderStatusOptions } from './git-provider-status-options'
+import type { SpoolVerifiedRemoteFilesystem } from './spool-verified-filesystem-types'
+import type { IGitMutationProvider } from './git-provider-mutation-contract'
+
+export type { GitProviderMutationOptions } from './git-provider-mutation-contract'
 
 // ─── PTY Provider ───────────────────────────────────────────────────
 
@@ -256,8 +260,16 @@ export type FileReadResult = {
 }
 
 export type IFilesystemProvider = {
-  readDir(dirPath: string): Promise<DirEntry[]>
-  readFile(filePath: string): Promise<FileReadResult>
+  /** Why: Spool cannot fall back to ordinary SSH file calls after binding a physical path. */
+  readonly spoolVerifiedFiles?: SpoolVerifiedRemoteFilesystem
+  readDir(dirPath: string, options?: { limit?: number; signal?: AbortSignal }): Promise<DirEntry[]>
+  readFile(filePath: string, options?: { signal?: AbortSignal }): Promise<FileReadResult>
+  /** Why: inventory must parse large JSONL without materializing the transcript. */
+  consumeSessionInventoryJsonLines?(
+    filePath: string,
+    consumeLine: (line: string) => void,
+    options?: { signal?: AbortSignal }
+  ): Promise<void>
   readTerminalArtifact?(
     filePath: string,
     options: TerminalArtifactAccessOptions
@@ -273,7 +285,7 @@ export type IFilesystemProvider = {
   ): Promise<FileStat>
   writeFileBase64(filePath: string, contentBase64: string): Promise<void>
   writeFileBase64Chunk(filePath: string, contentBase64: string, append: boolean): Promise<void>
-  stat(filePath: string): Promise<FileStat>
+  stat(filePath: string, options?: { signal?: AbortSignal }): Promise<FileStat>
   lstat?(filePath: string): Promise<FileStat>
   deletePath(targetPath: string, recursive?: boolean): Promise<void>
   createFile(filePath: string): Promise<void>
@@ -317,9 +329,7 @@ export type TerminalArtifactAccessOptions = {
 
 // ─── Git Provider ───────────────────────────────────────────────────
 
-export type { GitProviderStatusOptions } from './git-provider-status-options'
-
-export type IGitProvider = {
+export type IGitProvider = IGitMutationProvider & {
   getStatus(worktreePath: string, options?: GitProviderStatusOptions): Promise<GitStatusResult>
   getSubmoduleStatus(
     worktreePath: string,
@@ -328,7 +338,6 @@ export type IGitProvider = {
   ): Promise<GitStatusResult>
   checkIgnoredPaths(worktreePath: string, relativePaths: string[]): Promise<string[]>
   getHistory(worktreePath: string, options?: GitHistoryOptions): Promise<GitHistoryResult>
-  commit(worktreePath: string, message: string): Promise<{ success: boolean; error?: string }>
   getStagedCommitContext(worktreePath: string): Promise<CommitMessageDraftContext | null>
   getDiff(
     worktreePath: string,
@@ -336,10 +345,6 @@ export type IGitProvider = {
     staged: boolean,
     compareAgainstHead?: boolean
   ): Promise<GitDiffResult>
-  stageFile(worktreePath: string, filePath: string): Promise<void>
-  unstageFile(worktreePath: string, filePath: string): Promise<void>
-  bulkStageFiles(worktreePath: string, filePaths: string[]): Promise<void>
-  bulkUnstageFiles(worktreePath: string, filePaths: string[]): Promise<void>
   discardChanges(worktreePath: string, filePath: string): Promise<void>
   bulkDiscardChanges(worktreePath: string, filePaths: string[]): Promise<void>
   detectConflictOperation(worktreePath: string): Promise<GitConflictOperation>

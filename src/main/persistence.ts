@@ -1579,6 +1579,11 @@ function normalizeSshRemotePtyLease(value: unknown): SshRemotePtyLease | null {
     targetId: raw.targetId,
     ptyId: raw.ptyId,
     ...(typeof raw.worktreeId === 'string' ? { worktreeId: raw.worktreeId } : {}),
+    ...(typeof raw.worktreeInstanceId === 'string' &&
+    raw.worktreeInstanceId.trim() &&
+    raw.worktreeInstanceId.length <= 512
+      ? { worktreeInstanceId: raw.worktreeInstanceId }
+      : {}),
     ...(typeof raw.tabId === 'string' ? { tabId: raw.tabId } : {}),
     ...(typeof raw.leafId === 'string' && raw.leafId.length <= 256 ? { leafId: raw.leafId } : {}),
     state,
@@ -2417,6 +2422,7 @@ function makeProjectHostSetupId(
 
 function createMinimalPersistedTerminalTab(args: {
   worktreeId: string
+  worktreeInstanceId?: string | null
   tabId: string
   ptyId: string
   existingTabCount: number
@@ -2428,6 +2434,7 @@ function createMinimalPersistedTerminalTab(args: {
     id: args.tabId,
     ptyId: args.ptyId,
     worktreeId: args.worktreeId,
+    ...(args.worktreeInstanceId ? { worktreeInstanceId: args.worktreeInstanceId } : {}),
     title: defaultTitle,
     defaultTitle,
     customTitle: null,
@@ -2623,6 +2630,25 @@ function deleteRemovedTerminalScrollbackSnapshots(
 export type StoreOptions = {
   dataFile?: string
 }
+
+type SpoolVisibilityCommitBase = {
+  worktreeId: string
+  expectedInstanceId: string
+}
+
+export type SpoolVisibilityCommitChange = SpoolVisibilityCommitBase &
+  (
+    | {
+        visibility: 'public'
+        spoolIncarnationId: string
+        nextInstanceId?: never
+      }
+    | {
+        visibility: 'private'
+        spoolIncarnationId?: string
+        nextInstanceId?: string
+      }
+  )
 
 export class Store {
   private state: PersistedState
@@ -4963,6 +4989,95 @@ export class Store {
     return updated
   }
 
+  commitSpoolVisibility(changes: readonly SpoolVisibilityCommitChange[]): readonly WorktreeMeta[] {
+    if (changes.length === 0) {
+      return []
+    }
+    if (this.writesFrozen) {
+      throw new Error('spool_visibility_store_frozen')
+    }
+    const previousMeta = this.state.worktreeMeta
+    const previousWorktreeLineage = this.state.worktreeLineageById
+    const previousWorkspaceLineage = this.state.workspaceLineageByChildKey
+    const nextMeta = { ...previousMeta }
+    const nextWorktreeLineage = { ...previousWorktreeLineage }
+    const nextWorkspaceLineage = { ...previousWorkspaceLineage }
+    const committed: WorktreeMeta[] = []
+    const changedWorktreeIds = new Set<string>()
+    const existingInstanceIds = new Set(
+      Object.values(previousMeta).flatMap((meta) => (meta.instanceId ? [meta.instanceId] : []))
+    )
+    const nextInstanceIds = new Set<string>()
+
+    for (const change of changes) {
+      if (changedWorktreeIds.has(change.worktreeId)) {
+        throw new Error('spool_visibility_duplicate_change')
+      }
+      changedWorktreeIds.add(change.worktreeId)
+      const existing = nextMeta[change.worktreeId]
+      if (!existing || existing.instanceId !== change.expectedInstanceId) {
+        throw new Error('spool_visibility_stale_instance')
+      }
+      if (change.visibility === 'public' && !change.spoolIncarnationId?.trim()) {
+        throw new Error('spool_visibility_missing_incarnation')
+      }
+      if (
+        change.nextInstanceId !== undefined &&
+        (!change.nextInstanceId.trim() ||
+          existingInstanceIds.has(change.nextInstanceId) ||
+          nextInstanceIds.has(change.nextInstanceId))
+      ) {
+        throw new Error('spool_visibility_invalid_next_instance')
+      }
+      if (change.nextInstanceId) {
+        nextInstanceIds.add(change.nextInstanceId)
+        // Why: path reuse creates a new authorization identity; retaining
+        // lineage would let the replacement inherit provenance from the old instance.
+        for (const [worktreeId, lineage] of Object.entries(nextWorktreeLineage)) {
+          if (
+            lineage.worktreeInstanceId === change.expectedInstanceId ||
+            lineage.parentWorktreeInstanceId === change.expectedInstanceId
+          ) {
+            delete nextWorktreeLineage[worktreeId]
+          }
+        }
+        for (const [workspaceKey, lineage] of Object.entries(nextWorkspaceLineage)) {
+          if (
+            lineage.childInstanceId === change.expectedInstanceId ||
+            lineage.parentInstanceId === change.expectedInstanceId
+          ) {
+            delete nextWorkspaceLineage[workspaceKey as WorkspaceKey]
+          }
+        }
+      }
+      const updated: WorktreeMeta = {
+        ...existing,
+        spoolVisibility: change.visibility,
+        ...(change.spoolIncarnationId === undefined
+          ? {}
+          : { spoolIncarnationId: change.spoolIncarnationId }),
+        ...(change.nextInstanceId === undefined ? {} : { instanceId: change.nextInstanceId })
+      }
+      nextMeta[change.worktreeId] = updated
+      committed.push(updated)
+    }
+
+    this.state.worktreeMeta = nextMeta
+    this.state.worktreeLineageById = nextWorktreeLineage
+    this.state.workspaceLineageByChildKey = nextWorkspaceLineage
+    try {
+      // Why: Public/Private is an authorization boundary, so callers must not
+      // observe success before the complete batch is durably replaced on disk.
+      this.flushOrThrow()
+      return committed
+    } catch (error) {
+      this.state.worktreeMeta = previousMeta
+      this.state.worktreeLineageById = previousWorktreeLineage
+      this.state.workspaceLineageByChildKey = previousWorkspaceLineage
+      throw error
+    }
+  }
+
   removeWorktreeMeta(worktreeId: string): void {
     delete this.state.worktreeMeta[worktreeId]
     delete this.state.worktreeLineageById[worktreeId]
@@ -5769,11 +5884,9 @@ export class Store {
           continue
         }
         for (const tab of tabs) {
-          if (tab.ptyId) {
-            continue
-          }
           const priorTab = priorList.find((t) => t.id === tab.id)
           if (
+            !tab.ptyId &&
             priorTab?.ptyId &&
             this.isRestorablePtyBinding({
               ptyId: priorTab.ptyId,
@@ -5783,6 +5896,21 @@ export class Store {
             })
           ) {
             tab.ptyId = priorTab.ptyId
+          }
+          if (
+            !tab.worktreeInstanceId &&
+            priorTab?.worktreeInstanceId &&
+            priorTab.ptyId &&
+            tab.ptyId === priorTab.ptyId &&
+            this.isRestorablePtyBinding({
+              ptyId: priorTab.ptyId,
+              worktreeId,
+              targetId: this.getConnectionIdForWorktree(worktreeId),
+              tabId: tab.id
+            })
+          ) {
+            // Why: a stale renderer snapshot must not erase the spawn-time safety binding.
+            tab.worktreeInstanceId = priorTab.worktreeInstanceId
           }
         }
       }
@@ -6015,6 +6143,7 @@ export class Store {
   // spawn-success without the binding already being durable on disk.
   persistPtyBinding(args: {
     worktreeId: string
+    worktreeInstanceId?: string | null
     tabId: string
     leafId: string
     ptyId: string
@@ -6029,6 +6158,13 @@ export class Store {
     const tab = tabs?.find((t) => t.id === args.tabId)
     if (tab) {
       tab.ptyId = args.ptyId
+      if (args.worktreeInstanceId !== undefined) {
+        if (args.worktreeInstanceId === null) {
+          delete tab.worktreeInstanceId
+        } else {
+          tab.worktreeInstanceId = args.worktreeInstanceId
+        }
+      }
     } else {
       // Why: pty:spawn can beat the debounced session writer for a newly
       // created tab. Persist a minimal tab so hydration does not prune the
@@ -6357,11 +6493,13 @@ export class Store {
   }
 
   upsertSshRemotePtyLease(
-    lease: Omit<SshRemotePtyLease, 'createdAt' | 'updatedAt'> &
-      Partial<Pick<SshRemotePtyLease, 'createdAt' | 'updatedAt'>>
+    lease: Omit<SshRemotePtyLease, 'createdAt' | 'updatedAt' | 'worktreeInstanceId'> & {
+      worktreeInstanceId?: string | null
+    } & Partial<Pick<SshRemotePtyLease, 'createdAt' | 'updatedAt'>>
   ): void {
     this.state.sshRemotePtyLeases ??= []
-    const normalizedLease = { ...lease }
+    const { worktreeInstanceId, ...normalizedLease } = lease
+    const clearWorktreeInstanceId = worktreeInstanceId === null
     if (normalizedLease.leafId !== undefined && !isTerminalLeafId(normalizedLease.leafId)) {
       delete normalizedLease.leafId
     }
@@ -6380,8 +6518,13 @@ export class Store {
     const next: SshRemotePtyLease = {
       ...existing,
       ...normalizedLease,
+      ...(worktreeInstanceId ? { worktreeInstanceId } : {}),
       createdAt: existing?.createdAt ?? normalizedLease.createdAt ?? now,
       updatedAt: normalizedLease.updatedAt ?? now
+    }
+    if (clearWorktreeInstanceId) {
+      // Why: unknown or conflicting reattach evidence must not revive a prior trusted binding.
+      delete next.worktreeInstanceId
     }
     if (existingIndex >= 0) {
       this.state.sshRemotePtyLeases[existingIndex] = next

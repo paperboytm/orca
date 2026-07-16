@@ -90,6 +90,7 @@ import { useGitStatusPolling } from './components/right-sidebar/useGitStatusPoll
 import { useEditorExternalWatch } from './hooks/useEditorExternalWatch'
 import { useAutoAckViewedAgent } from './hooks/useAutoAckViewedAgent'
 import { useUnreadDockBadge } from './hooks/useUnreadDockBadge'
+import { useSpoolSharingBridge } from './hooks/useSpoolSharingBridge'
 import {
   resolvePrimarySelectionMiddleClickPaste,
   usePrimarySelectionPaste
@@ -178,6 +179,7 @@ import {
   hasRequestedBackgroundTerminalWorktreeMount,
   subscribeBackgroundTerminalWorktreeMountRequests
 } from './components/terminal/background-terminal-worktree-mount'
+import { SpoolControlRequestDialog } from './components/spool/SpoolControlRequestDialog'
 
 // Why: agents alive during a hard kill (crash, forced update install) need a
 // reasonably fresh resume record on disk; one minute bounds the lost window
@@ -317,6 +319,8 @@ const WorkspaceCleanupDialog = lazy(
   () => import('./components/workspace-cleanup/WorkspaceCleanupDialog')
 )
 const Terminal = lazy(() => import('./components/Terminal'))
+const SpoolWorkspaceSurface = lazy(() => import('./components/spool/SpoolWorkspaceSurface'))
+const SpoolRightSidebar = lazy(() => import('./components/spool/SpoolRightSidebar'))
 const StatusBar = lazy(() =>
   import('./components/status-bar/StatusBar').then((module) => ({ default: module.StatusBar }))
 )
@@ -410,6 +414,7 @@ function App(): React.JSX.Element {
   const clearUnreadDockBadge = useUnreadDockBadge()
   useRadixBodyPointerEventsRecovery()
   useWebSessionTabsSync()
+  useSpoolSharingBridge()
   const [floatingTerminalOpen, setFloatingTerminalOpen] = useState(false)
   const floatingWorkspaceTourInteractionSnapshotRef = useRef<{
     wasPreviouslyInteracted?: boolean
@@ -468,6 +473,8 @@ function App(): React.JSX.Element {
   )
 
   const activeView = useAppStore((s) => s.activeView)
+  const activeSpoolWorkspaceRoute = useAppStore((s) => s.activeSpoolWorkspaceRoute)
+  const hasActiveSpoolWorkspace = activeView === 'terminal' && activeSpoolWorkspaceRoute !== null
   const activeModal = useAppStore((s) => s.activeModal)
   const featureTipsSeenIds = useAppStore((s) => s.featureTipsSeenIds)
   const featureInteractions = useAppStore((s) => s.featureInteractions)
@@ -512,6 +519,7 @@ function App(): React.JSX.Element {
   )
   const statusBarVisible = useAppStore((s) => s.statusBarVisible)
   const showFloatingTerminalButton =
+    !hasActiveSpoolWorkspace &&
     floatingTerminalEnabled &&
     (floatingTerminalTriggerLocation === 'floating-button' || !statusBarVisible)
   const hasMountedTerminalWorkbenchRef = useRef(false)
@@ -528,15 +536,21 @@ function App(): React.JSX.Element {
   // Why: visible worktree creation owns its faux tab strip from start to finish;
   // the previous workspace must stay mounted for retention without rendering
   // real chrome.
-  const creationLayoutActive = shouldShowWorktreeCreationSurface({
-    activeView,
-    activePendingCreationId,
-    hasActivePendingCreation: activePendingCreationExists
-  })
+  const creationLayoutActive =
+    shouldShowWorktreeCreationSurface({
+      activeView,
+      activePendingCreationId,
+      hasActivePendingCreation: activePendingCreationExists
+    }) && !hasActiveSpoolWorkspace
   const workspaceChromeActive =
-    activeView === 'terminal' && activeWorktreeId !== null && !creationLayoutActive
+    activeView === 'terminal' &&
+    (activeWorktreeId !== null || hasActiveSpoolWorkspace) &&
+    !creationLayoutActive
   const terminalWorkbenchVisible =
-    activeView === 'terminal' && activeWorktreeId !== null && !creationLayoutActive
+    activeView === 'terminal' &&
+    activeWorktreeId !== null &&
+    !hasActiveSpoolWorkspace &&
+    !creationLayoutActive
   // Why: a closed empty floating workspace is not startup-critical. Once it owns
   // tabs, keep it mounted while closed so hidden terminal/browser/editor panes
   // retain their local state.
@@ -1519,7 +1533,8 @@ function App(): React.JSX.Element {
   }, [actions])
 
   const hasTabBar = tabCount >= 2
-  const showTitlebarExpandButton = workspaceChromeActive && !hasTabBar && effectiveActiveTabExpanded
+  const showTitlebarExpandButton =
+    workspaceChromeActive && !hasActiveSpoolWorkspace && !hasTabBar && effectiveActiveTabExpanded
   // Why: Activity and Space are full-page navigation surfaces — same
   // treatment as Settings — so the worktree sidebar is removed for those views.
   const showSidebar =
@@ -1557,6 +1572,7 @@ function App(): React.JSX.Element {
     )
   }
 
+  const localWorkspaceChromeActive = workspaceChromeActive && !hasActiveSpoolWorkspace
   const globalShortcutStateRef = useRef({
     activeView,
     activeWorktreeId,
@@ -1567,7 +1583,7 @@ function App(): React.JSX.Element {
     keybindings,
     terminalShortcutPolicy: settings?.terminalShortcutPolicy,
     setFloatingTerminalOpenWithFocus,
-    workspaceChromeActive,
+    workspaceChromeActive: localWorkspaceChromeActive,
     creationLayoutActive
   })
   // Why: window key listeners are global and long-lived; keep one registration
@@ -1582,7 +1598,7 @@ function App(): React.JSX.Element {
     keybindings,
     terminalShortcutPolicy: settings?.terminalShortcutPolicy,
     setFloatingTerminalOpenWithFocus,
-    workspaceChromeActive,
+    workspaceChromeActive: localWorkspaceChromeActive,
     creationLayoutActive
   }
 
@@ -2031,15 +2047,17 @@ function App(): React.JSX.Element {
           <>
             <img src={logo} alt="" aria-hidden className="titlebar-logo" />
             <Tooltip>
-              <TooltipTrigger asChild>
-                <button
-                  className="titlebar-icon-button"
-                  aria-label={translate('auto.App.8b0b8eb54f', 'Application menu')}
-                  onClick={() => window.api.ui.popupMenu()}
-                >
-                  <MoreHorizontal size={14} />
-                </button>
-              </TooltipTrigger>
+              <TooltipTrigger
+                render={
+                  <button
+                    className="titlebar-icon-button"
+                    aria-label={translate('auto.App.8b0b8eb54f', 'Application menu')}
+                    onClick={() => window.api.ui.popupMenu()}
+                  >
+                    <MoreHorizontal size={14} />
+                  </button>
+                }
+              />
               <TooltipContent side="bottom" sideOffset={6}>
                 {translate('auto.App.8b0b8eb54f', 'Application menu')}
               </TooltipContent>
@@ -2052,19 +2070,21 @@ function App(): React.JSX.Element {
           <>
             {settings?.showTitlebarAppName !== false && (
               <ContextMenu>
-                <ContextMenuTrigger asChild>
-                  <div
-                    className="titlebar-app-name"
-                    aria-label={translate('auto.App.5096cbbc86', 'Orca')}
-                  >
-                    <span className="titlebar-app-name-main">
-                      {translate('auto.App.5096cbbc86', 'Orca')}
-                    </span>
-                  </div>
-                </ContextMenuTrigger>
+                <ContextMenuTrigger
+                  render={
+                    <div
+                      className="titlebar-app-name"
+                      aria-label={translate('auto.App.5096cbbc86', 'Orca')}
+                    >
+                      <span className="titlebar-app-name-main">
+                        {translate('auto.App.5096cbbc86', 'Orca')}
+                      </span>
+                    </div>
+                  }
+                />
                 <ContextMenuContent>
                   <ContextMenuItem
-                    onSelect={() => {
+                    onClick={() => {
                       void actions.updateSettings({ showTitlebarAppName: false })
                     }}
                   >
@@ -2077,15 +2097,17 @@ function App(): React.JSX.Element {
         )}
         {showSidebar && (
           <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                className="sidebar-toggle"
-                onClick={actions.toggleSidebar}
-                aria-label={translate('auto.App.e4b9e7dff7', 'Toggle sidebar')}
-              >
-                <PanelLeft size={16} />
-              </button>
-            </TooltipTrigger>
+            <TooltipTrigger
+              render={
+                <button
+                  className="sidebar-toggle"
+                  onClick={actions.toggleSidebar}
+                  aria-label={translate('auto.App.e4b9e7dff7', 'Toggle sidebar')}
+                >
+                  <PanelLeft size={16} />
+                </button>
+              }
+            />
             <TooltipContent side="bottom" sideOffset={6}>
               {translate('auto.App.ce37cf5279', 'Toggle sidebar ({{value0}})', {
                 value0: leftSidebarShortcutLabel
@@ -2102,16 +2124,18 @@ function App(): React.JSX.Element {
         // and ml-auto has no spare width; keep a fixed gutter before Back.
         <div className="ml-auto mr-3 flex items-center pl-2">
           <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                className="sidebar-toggle sidebar-toggle-compact"
-                onClick={() => useAppStore.getState().goBackWorktree()}
-                disabled={!canGoBackWorktree}
-                aria-label={translate('auto.App.064bd07810', 'Go back')}
-              >
-                <ArrowLeft size={12} />
-              </button>
-            </TooltipTrigger>
+            <TooltipTrigger
+              render={
+                <button
+                  className="sidebar-toggle sidebar-toggle-compact"
+                  onClick={() => useAppStore.getState().goBackWorktree()}
+                  disabled={!canGoBackWorktree}
+                  aria-label={translate('auto.App.064bd07810', 'Go back')}
+                >
+                  <ArrowLeft size={12} />
+                </button>
+              }
+            />
             <TooltipContent side="bottom" sideOffset={6}>
               {translate('auto.App.fe21e8f6f5', 'Go back ({{value0}})', {
                 value0: historyBackShortcutLabel
@@ -2119,16 +2143,18 @@ function App(): React.JSX.Element {
             </TooltipContent>
           </Tooltip>
           <Tooltip>
-            <TooltipTrigger asChild>
-              <button
-                className="sidebar-toggle sidebar-toggle-compact"
-                onClick={() => useAppStore.getState().goForwardWorktree()}
-                disabled={!canGoForwardWorktree}
-                aria-label={translate('auto.App.cf9099fe98', 'Go forward')}
-              >
-                <ArrowRight size={12} />
-              </button>
-            </TooltipTrigger>
+            <TooltipTrigger
+              render={
+                <button
+                  className="sidebar-toggle sidebar-toggle-compact"
+                  onClick={() => useAppStore.getState().goForwardWorktree()}
+                  disabled={!canGoForwardWorktree}
+                  aria-label={translate('auto.App.cf9099fe98', 'Go forward')}
+                >
+                  <ArrowRight size={12} />
+                </button>
+              }
+            />
             <TooltipContent side="bottom" sideOffset={6}>
               {translate('auto.App.f7aa73e785', 'Go forward ({{value0}})', {
                 value0: historyForwardShortcutLabel
@@ -2142,15 +2168,17 @@ function App(): React.JSX.Element {
 
   const rightSidebarToggle = showRightSidebarControls ? (
     <Tooltip>
-      <TooltipTrigger asChild>
-        <button
-          className="sidebar-toggle mr-2"
-          onClick={actions.toggleRightSidebar}
-          aria-label={translate('auto.App.9e0b441a91', 'Toggle right sidebar')}
-        >
-          <PanelRight size={16} />
-        </button>
-      </TooltipTrigger>
+      <TooltipTrigger
+        render={
+          <button
+            className="sidebar-toggle mr-2"
+            onClick={actions.toggleRightSidebar}
+            aria-label={translate('auto.App.9e0b441a91', 'Toggle right sidebar')}
+          >
+            <PanelRight size={16} />
+          </button>
+        }
+      />
       <TooltipContent side="bottom" sideOffset={6}>
         {translate('auto.App.c184e056de', 'Toggle right sidebar ({{value0}})', {
           value0: rightSidebarShortcutLabel
@@ -2171,16 +2199,18 @@ function App(): React.JSX.Element {
       )}
       {showTitlebarExpandButton && (
         <Tooltip>
-          <TooltipTrigger asChild>
-            <button
-              className="titlebar-icon-button"
-              onClick={handleToggleExpand}
-              aria-label={translate('auto.App.c1cf0b0e4a', 'Collapse pane')}
-              disabled={!activeTabCanExpand}
-            >
-              <Minimize2 size={14} />
-            </button>
-          </TooltipTrigger>
+          <TooltipTrigger
+            render={
+              <button
+                className="titlebar-icon-button"
+                onClick={handleToggleExpand}
+                aria-label={translate('auto.App.c1cf0b0e4a', 'Collapse pane')}
+                disabled={!activeTabCanExpand}
+              >
+                <Minimize2 size={14} />
+              </button>
+            }
+          />
           <TooltipContent side="bottom" sideOffset={6}>
             {translate('auto.App.c1cf0b0e4a', 'Collapse pane')}
           </TooltipContent>
@@ -2199,6 +2229,7 @@ function App(): React.JSX.Element {
   const workspaceProfileSwitcher =
     showProfileSwitcherInTopRight &&
     workspaceChromeActive &&
+    !hasActiveSpoolWorkspace &&
     leftTitlebarChromeLayout.shouldMount &&
     !stackedSidebarOpen ? (
       <div
@@ -2234,10 +2265,11 @@ function App(): React.JSX.Element {
         } as React.CSSProperties
       }
     >
-      <TooltipProvider delayDuration={400}>
+      <TooltipProvider delay={400}>
         <ConfirmationDialogProvider>
           <LinkRoutingPreferenceDialogProvider>
             <WorkspacePortScanner enabled={workspaceSessionReady} />
+            <SpoolControlRequestDialog />
             {/* Why: leaf-mounted retention sync keeps agent-status retention
             subscriptions from re-rendering the App tree. */}
             <RetainedAgentsSyncGate />
@@ -2439,6 +2471,7 @@ function App(): React.JSX.Element {
                               {activeView === 'activity' ? <ActivityPrototypePage /> : null}
                               {activeView === 'space' ? <WorkspaceSpacePage /> : null}
                               {activeView === 'mobile' ? <MobilePage /> : null}
+                              {hasActiveSpoolWorkspace ? <SpoolWorkspaceSurface /> : null}
                               {activeView === 'terminal' &&
                               creationLayoutActive &&
                               activePendingCreationId ? (
@@ -2451,6 +2484,7 @@ function App(): React.JSX.Element {
                               ) : null}
                               {activeView === 'terminal' &&
                               !activeWorktreeId &&
+                              !hasActiveSpoolWorkspace &&
                               !creationLayoutActive ? (
                                 <Landing />
                               ) : null}
@@ -2469,16 +2503,23 @@ function App(): React.JSX.Element {
                 </div>
                 {/* Why: keep the right-sidebar shell mounted for layout stability.
               Its heavy panels disconnect while closed so workspace wake stays
-              responsive. Unmount on the tasks view since that surface is
-              intentionally distraction-free. */}
+              responsive. Remote panel state is route-scoped, so its boundary
+              also resets when the owning Desktop/worktree binding changes. */}
                 {showRightSidebarControls ? (
                   <RecoverableRenderErrorBoundary
                     boundaryId="right-sidebar"
                     surface="right-sidebar"
                     resetKey={
-                      rightSidebarTab === 'explorer'
-                        ? `${rightSidebarTab}:${rightSidebarExplorerView}`
-                        : rightSidebarTab
+                      hasActiveSpoolWorkspace && activeSpoolWorkspaceRoute
+                        ? JSON.stringify([
+                            activeSpoolWorkspaceRoute.desktopRef,
+                            activeSpoolWorkspaceRoute.worktreeRef,
+                            activeSpoolWorkspaceRoute.connectionEpoch,
+                            rightSidebarTab
+                          ])
+                        : rightSidebarTab === 'explorer'
+                          ? `${rightSidebarTab}:${rightSidebarExplorerView}`
+                          : rightSidebarTab
                     }
                     title={translate('auto.App.ed6b168d00', 'The right sidebar hit an error.')}
                     description={translate(
@@ -2486,7 +2527,13 @@ function App(): React.JSX.Element {
                       'Retry the sidebar or switch tabs to reload this surface.'
                     )}
                   >
-                    <RightSidebar />
+                    <Suspense fallback={null}>
+                      {hasActiveSpoolWorkspace && activeSpoolWorkspaceRoute ? (
+                        <SpoolRightSidebar route={activeSpoolWorkspaceRoute} />
+                      ) : (
+                        <RightSidebar />
+                      )}
+                    </Suspense>
                   </RecoverableRenderErrorBoundary>
                 ) : null}
               </div>
@@ -2512,7 +2559,7 @@ function App(): React.JSX.Element {
                 </RecoverableRenderErrorBoundary>
               </Suspense>
             ) : null}
-            {statusBarVisible ? (
+            {statusBarVisible && !hasActiveSpoolWorkspace ? (
               <Suspense
                 fallback={
                   <div className="h-6 min-h-[24px] shrink-0 border-t border-border bg-[var(--bg-titlebar,var(--card))]" />

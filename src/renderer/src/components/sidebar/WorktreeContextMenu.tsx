@@ -29,8 +29,11 @@ import {
   Workflow,
   FolderInput,
   FolderPlus,
-  FolderTree
+  FolderTree,
+  Globe2,
+  LockKeyhole
 } from 'lucide-react'
+import { toast } from 'sonner'
 import { useAppStore } from '@/store'
 import type { AppState } from '@/store/types'
 import { useAllWorktrees, useRepoById, useRepoMap, useWorktreeMap } from '@/store/selectors'
@@ -54,6 +57,7 @@ import {
   parseWorkspaceKey,
   worktreeWorkspaceKey
 } from '../../../../shared/workspace-scope'
+import { SpoolWorktreeVisibilityDialog } from '@/components/spool/SpoolWorktreeVisibilityDialog'
 
 type Props = {
   worktree: Worktree
@@ -289,6 +293,8 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
     effectiveSelectedWorktrees
   )
   const [createGroupDialogOpen, setCreateGroupDialogOpen] = useState(false)
+  const [spoolPublicationDialogOpen, setSpoolPublicationDialogOpen] = useState(false)
+  const [spoolVisibilityPending, setSpoolVisibilityPending] = useState(false)
   const [parentPicker, setParentPicker] = useState<{
     childWorktreeId: string
     anchorElement: HTMLElement
@@ -330,6 +336,11 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
   )
   const deleteStateByWorktreeId = useAppStore((s) =>
     selectMenuScopedMap(menuOpen, s.deleteStateByWorktreeId, EMPTY_DELETE_STATE_BY_WORKTREE_ID)
+  )
+  const spoolOwnerWorktree = useAppStore((state) =>
+    menuOpen || spoolPublicationDialogOpen
+      ? (state.spoolOwnerWorktrees.find((entry) => entry.worktreeId === worktree.id) ?? null)
+      : null
   )
   const scopeRef = useRef<HTMLDivElement>(null)
   const contextMenuOpenedAtRef = useRef<number | null>(null)
@@ -435,6 +446,28 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
   const handleTogglePin = useCallback(() => {
     setWorktreesPinnedAndReveal([worktree.id], !worktree.isPinned)
   }, [worktree.id, worktree.isPinned, setWorktreesPinnedAndReveal])
+
+  const handleSpoolVisibility = useCallback(() => {
+    if (!spoolOwnerWorktree || spoolVisibilityPending) {
+      return
+    }
+    if (spoolOwnerWorktree.visibility === 'private') {
+      setSpoolPublicationDialogOpen(true)
+      return
+    }
+    setSpoolVisibilityPending(true)
+    void window.api.spoolSharing
+      .setWorktreeVisibility({ worktreeId: worktree.id, visibility: 'private' })
+      .catch(() => {
+        toast.error(
+          translate(
+            'auto.components.sidebar.WorktreeContextMenu.spoolPrivateFailed',
+            'Could not make this worktree private.'
+          )
+        )
+      })
+      .finally(() => setSpoolVisibilityPending(false))
+  }, [spoolOwnerWorktree, spoolVisibilityPending, worktree.id])
 
   const handleCreateGroupFromRepo = useCallback(() => {
     if (!repo) {
@@ -621,24 +654,21 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
     }
   }, [])
 
-  const handleCloseAutoFocus = useCallback(
-    (event: Event) => {
-      // Why: Radix otherwise restores focus to the hidden context-menu trigger.
-      // When Sleep/Delete clears the active workspace and remounts the sidebar,
-      // that focus restore can scroll the virtual list away from the row the
-      // user just acted on.
-      event.preventDefault()
-      if (pendingParentPickerRef.current) {
-        window.setTimeout(openPendingParentPicker, 0)
-        return
-      }
-      const sidebar = scopeRef.current?.closest('[data-worktree-sidebar]')
-      if (sidebar instanceof HTMLElement) {
-        sidebar.focus({ preventScroll: true })
-      }
-    },
-    [openPendingParentPicker]
-  )
+  const handleCloseAutoFocus = useCallback((): boolean => {
+    // Why: Base UI otherwise restores focus to the hidden context-menu trigger.
+    // When Sleep/Delete clears the active workspace and remounts the sidebar,
+    // that focus restore can scroll the virtual list away from the row the
+    // user just acted on. Return false to suppress the default focus restore.
+    if (pendingParentPickerRef.current) {
+      window.setTimeout(openPendingParentPicker, 0)
+      return false
+    }
+    const sidebar = scopeRef.current?.closest('[data-worktree-sidebar]')
+    if (sidebar instanceof HTMLElement) {
+      sidebar.focus({ preventScroll: true })
+    }
+    return false
+  }, [openPendingParentPicker])
 
   return (
     <div
@@ -669,14 +699,16 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
     >
       {children}
       <DropdownMenu open={menuOpen} onOpenChange={setMenuOpenState} modal={false}>
-        <DropdownMenuTrigger asChild>
-          <button
-            aria-hidden
-            tabIndex={-1}
-            className="pointer-events-none absolute size-px opacity-0"
-            style={{ left: menuPoint.x, top: menuPoint.y }}
-          />
-        </DropdownMenuTrigger>
+        <DropdownMenuTrigger
+          render={
+            <button
+              aria-hidden
+              tabIndex={-1}
+              className="pointer-events-none absolute size-px opacity-0"
+              style={{ left: menuPoint.x, top: menuPoint.y }}
+            />
+          }
+        />
         <DropdownMenuContent
           className={cn('w-52', contentClassName)}
           sideOffset={0}
@@ -689,13 +721,13 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
           }}
           onMouseUpCapture={suppressOpeningPointerEvent}
           onClickCapture={suppressOpeningPointerEvent}
-          onCloseAutoFocus={handleCloseAutoFocus}
+          finalFocus={handleCloseAutoFocus}
         >
           <DropdownMenuLabel className="px-2 py-1 text-[11px] font-medium text-muted-foreground">
             {translate('auto.components.sidebar.WorktreeContextMenu.workspaceSection', 'Workspace')}
           </DropdownMenuLabel>
           {!isMultiContext && (
-            <DropdownMenuItem onSelect={handleRename} disabled={isDeleting}>
+            <DropdownMenuItem onClick={handleRename} disabled={isDeleting}>
               <Pencil className="size-3.5" />
               {translate('auto.components.sidebar.WorktreeContextMenu.439fa94d53', 'Update')}
             </DropdownMenuItem>
@@ -721,7 +753,7 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
                     <DropdownMenuRadioItem
                       key={status.id}
                       value={status.id}
-                      onSelect={() => handleAssignWorkspaceStatus(status.id)}
+                      onClick={() => handleAssignWorkspaceStatus(status.id)}
                     >
                       <meta.icon className={cn('size-3.5', meta.tone)} />
                       {status.label}
@@ -739,18 +771,39 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
                 connectionId={repo?.connectionId ?? null}
                 disabled={isDeleting}
               />
-              <DropdownMenuItem onSelect={handleCopyPath} disabled={isDeleting}>
+              <DropdownMenuItem onClick={handleCopyPath} disabled={isDeleting}>
                 <Copy className="size-3.5" />
                 {translate('auto.components.sidebar.WorktreeContextMenu.3350101edb', 'Copy Path')}
               </DropdownMenuItem>
+              {spoolOwnerWorktree ? (
+                <DropdownMenuItem
+                  onClick={handleSpoolVisibility}
+                  disabled={isDeleting || spoolVisibilityPending}
+                >
+                  {spoolOwnerWorktree.visibility === 'public' ? (
+                    <LockKeyhole className="size-3.5" />
+                  ) : (
+                    <Globe2 className="size-3.5" />
+                  )}
+                  {spoolOwnerWorktree.visibility === 'public'
+                    ? translate(
+                        'auto.components.sidebar.WorktreeContextMenu.makeSpoolPrivate',
+                        'Make private'
+                      )
+                    : translate(
+                        'auto.components.sidebar.WorktreeContextMenu.makeSpoolPublic',
+                        'Make public'
+                      )}
+                </DropdownMenuItem>
+              ) : null}
               <DropdownMenuSeparator />
-              <DropdownMenuItem onSelect={handleTogglePin} disabled={isDeleting}>
+              <DropdownMenuItem onClick={handleTogglePin} disabled={isDeleting}>
                 {worktree.isPinned ? <PinOff className="size-3.5" /> : <Pin className="size-3.5" />}
                 {worktree.isPinned
                   ? translate('auto.components.sidebar.WorktreeContextMenu.697d0f6e1b', 'Unpin')
                   : translate('auto.components.sidebar.WorktreeContextMenu.3baa7d6507', 'Pin')}
               </DropdownMenuItem>
-              <DropdownMenuItem onSelect={handleToggleRead} disabled={isDeleting}>
+              <DropdownMenuItem onClick={handleToggleRead} disabled={isDeleting}>
                 {worktree.isUnread ? (
                   <BellOff className="size-3.5" />
                 ) : (
@@ -766,7 +819,7 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
               {repo ? (
                 <>
                   <DropdownMenuSeparator />
-                  <DropdownMenuItem onSelect={handleCreateGroupFromRepo} disabled={isDeleting}>
+                  <DropdownMenuItem onClick={handleCreateGroupFromRepo} disabled={isDeleting}>
                     <FolderPlus className="size-3.5" />
                     {translate(
                       'auto.components.sidebar.WorktreeContextMenu.503ec0f8e6',
@@ -787,7 +840,7 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
                           <DropdownMenuItem
                             key={group.id}
                             disabled={repo.projectGroupId === group.id}
-                            onSelect={() => handleMoveProjectToGroup(group.id)}
+                            onClick={() => handleMoveProjectToGroup(group.id)}
                           >
                             <span className="max-w-48 truncate">{group.name}</span>
                           </DropdownMenuItem>
@@ -796,7 +849,7 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
                     </DropdownMenuSub>
                   ) : null}
                   {repo.projectGroupId ? (
-                    <DropdownMenuItem onSelect={handleRemoveProjectFromGroup} disabled={isDeleting}>
+                    <DropdownMenuItem onClick={handleRemoveProjectFromGroup} disabled={isDeleting}>
                       <CircleX className="size-3.5" />
                       {translate(
                         'auto.components.sidebar.WorktreeContextMenu.d35dfeae58',
@@ -808,7 +861,7 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
               ) : null}
               <DropdownMenuSeparator />
               <DropdownMenuItem
-                onSelect={handleOpenParentPicker}
+                onClick={handleOpenParentPicker}
                 disabled={isWorktreeParentPickerDisabled({ isDeleting, eligibleParentCount })}
               >
                 <FolderTree className="size-3.5" />
@@ -817,7 +870,7 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
               {(validParentWorktreeId || lineage || workspaceLineage) && (
                 <>
                   {validParentWorktreeId && (
-                    <DropdownMenuItem onSelect={handleOpenParent} disabled={isDeleting}>
+                    <DropdownMenuItem onClick={handleOpenParent} disabled={isDeleting}>
                       <Workflow className="size-3.5" />
                       {translate(
                         'auto.components.sidebar.WorktreeContextMenu.8d9cd19d09',
@@ -826,7 +879,7 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
                     </DropdownMenuItem>
                   )}
                   {(lineage || workspaceLineage) && (
-                    <DropdownMenuItem onSelect={handleRemoveParentLink} disabled={isDeleting}>
+                    <DropdownMenuItem onClick={handleRemoveParentLink} disabled={isDeleting}>
                       <Unlink className="size-3.5" />
                       {translate(
                         'auto.components.sidebar.WorktreeContextMenu.579b1a8e61',
@@ -841,7 +894,7 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
           )}
           {isMultiContext && hasAnyContextLineage ? (
             <>
-              <DropdownMenuItem onSelect={handleRemoveParentLink} disabled={deletingContext}>
+              <DropdownMenuItem onClick={handleRemoveParentLink} disabled={deletingContext}>
                 <Unlink className="size-3.5" />
                 {translate(
                   'auto.components.sidebar.WorktreeContextMenu.579b1a8e61',
@@ -853,15 +906,17 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
           ) : null}
 
           <Tooltip>
-            <TooltipTrigger asChild>
-              <DropdownMenuItem
-                onSelect={handleCloseTerminals}
-                disabled={deletingContext || sleepableWorktrees.length === 0}
-              >
-                <Moon className="size-3.5" />
-                {sleepLabel}
-              </DropdownMenuItem>
-            </TooltipTrigger>
+            <TooltipTrigger
+              render={
+                <DropdownMenuItem
+                  onClick={handleCloseTerminals}
+                  disabled={deletingContext || sleepableWorktrees.length === 0}
+                >
+                  <Moon className="size-3.5" />
+                  {sleepLabel}
+                </DropdownMenuItem>
+              }
+            />
             <TooltipContent side="right" sideOffset={8} className="max-w-[200px] text-pretty">
               {isMultiContext
                 ? translate(
@@ -879,17 +934,19 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
              it with the enabled Remove Project action below. */}
           {!isMultiContext && removesProject ? (
             <Tooltip>
-              <TooltipTrigger asChild>
-                <div>
-                  <DropdownMenuItem variant="destructive" disabled>
-                    <Trash2 className="size-3.5" />
-                    {translate(
-                      'auto.components.sidebar.WorktreeContextMenu.deleteWorktree',
-                      'Delete Worktree'
-                    )}
-                  </DropdownMenuItem>
-                </div>
-              </TooltipTrigger>
+              <TooltipTrigger
+                render={
+                  <div>
+                    <DropdownMenuItem variant="destructive" disabled>
+                      <Trash2 className="size-3.5" />
+                      {translate(
+                        'auto.components.sidebar.WorktreeContextMenu.deleteWorktree',
+                        'Delete Worktree'
+                      )}
+                    </DropdownMenuItem>
+                  </div>
+                }
+              />
               <TooltipContent side="right" sideOffset={8} className="max-w-[200px] text-pretty">
                 {translate(
                   'auto.components.sidebar.WorktreeContextMenu.primaryDeleteDisabled',
@@ -904,7 +961,7 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
              this preserves Radix's flat roving-tabindex keyboard navigation. */}
           <DropdownMenuItem
             variant="destructive"
-            onSelect={handleDelete}
+            onClick={handleDelete}
             disabled={
               deletingContext ||
               (!isMultiContext && worktree.isMainWorktree && !removesProject) ||
@@ -938,6 +995,12 @@ const WorktreeContextMenu = React.memo(function WorktreeContextMenu({
           </DropdownMenuItem>
         </DropdownMenuContent>
       </DropdownMenu>
+      <SpoolWorktreeVisibilityDialog
+        open={spoolPublicationDialogOpen}
+        worktreeId={worktree.id}
+        worktreeName={worktree.displayName || worktree.branch || worktree.id}
+        onOpenChange={setSpoolPublicationDialogOpen}
+      />
       <ProjectGroupNameDialog
         open={createGroupDialogOpen}
         title={translate(

@@ -152,6 +152,10 @@ import {
 import type { SleepingAgentLaunchConfig } from '../../shared/agent-session-resume'
 import type { RuntimeClientEvent } from '../../shared/runtime-client-events'
 import { toRuntimeActivateWorktreeEvent } from '../../shared/runtime-client-events'
+import type {
+  SpoolPairedRuntimeResolvedWorktree,
+  SpoolPairedRuntimeWorktreeSelector
+} from '../../shared/spool/spool-paired-runtime-host-contract'
 import type { SshConnectionState } from '../../shared/ssh-types'
 import type {
   LinearCurrentIssueContextHints,
@@ -272,6 +276,7 @@ import {
   configureAiVaultSessionSources,
   listAiVaultSessions
 } from '../ai-vault/cached-session-list'
+import type { AiVaultSessionRuntimeTarget } from '../ai-vault/session-root-configuration'
 import type { AiVaultListArgs, AiVaultListResult } from '../../shared/ai-vault-types'
 import type {
   WorkspacePortKillRequest,
@@ -1001,6 +1006,8 @@ function isCursorAgentOrchestrationTarget(
 type RuntimePtyWorktreeRecord = {
   ptyId: string
   worktreeId: string
+  /** Trusted spawn-time identity; null means the PTY must not cross a Spool boundary. */
+  worktreeInstanceId: string | null
   connectionId: string | null
   // Why: a Windows host can own both native and WSL panes; preamble command
   // selection must follow the pane that executes it, not process.platform.
@@ -1061,6 +1068,10 @@ type TerminalCreateOptions = {
   // intermediate pty-backed publish so the new tab doesn't briefly flash in
   // the wrong (active) group before the corrected snapshot lands.
   deferMobileSessionPublish?: boolean
+  /** Why: Spool grants can be revoked during async launch preparation. */
+  beforeSpawn?: () => void | Promise<void>
+  /** Why: agent trust persistence is also a launch side effect, before PTY spawn. */
+  beforeAgentTrust?: () => void | Promise<void>
 }
 
 type PtyForegroundAgentRefresh = {
@@ -2592,11 +2603,11 @@ export class OrcaRuntimeService {
       // terminal output. worktree.ps reads this at query time so mobile shows the
       // same inline agent rows the desktop sidebar does — same source, 1:1.
       getAgentStatusSnapshot?: () => AgentStatusIpcPayload[]
-      // Why: codex-home paths for the Agent Session History scan must be sourced
-      // here, not via the window-only registerCoreHandlers path — that path never
-      // runs under `orca serve`, so remote/SSH hosts would silently drop
-      // managed-Codex sessions. The runtime ctor runs in BOTH window and serve.
+      // Why: Claude and Codex history roots must also be available under headless `orca serve`.
       getAdditionalAiVaultCodexHomePaths?: () => readonly string[]
+      resolveAiVaultClaudeProjectsDirs?: (
+        target: AiVaultSessionRuntimeTarget
+      ) => Promise<readonly string[]>
       buildAgentHookPtyEnv?: () => Record<string, string>
       getDesktopWindowStatus?: () => RuntimeDesktopWindowStatus
     }
@@ -2607,12 +2618,11 @@ export class OrcaRuntimeService {
       this.agentDetector = new AgentDetector(stats)
     }
     this.getAgentStatusSnapshotFn = deps?.getAgentStatusSnapshot ?? null
-    // Why: configure the shared AiVault scan cache from a serve-mode-reachable
-    // seam so the aiVault.listSessions RPC includes managed-Codex + WSL sessions
-    // even on headless `orca serve` hosts where registerCoreHandlers never runs.
-    if (deps?.getAdditionalAiVaultCodexHomePaths) {
+    // Why: both managed-provider root resolvers must work without desktop IPC registration.
+    if (deps?.getAdditionalAiVaultCodexHomePaths || deps?.resolveAiVaultClaudeProjectsDirs) {
       configureAiVaultSessionSources({
-        getAdditionalCodexHomePaths: deps.getAdditionalAiVaultCodexHomePaths
+        getAdditionalCodexHomePaths: deps.getAdditionalAiVaultCodexHomePaths,
+        resolveClaudeProjectsDirs: deps.resolveAiVaultClaudeProjectsDirs
       })
     }
     // Why: the daemon adapter is installed via `setLocalPtyProvider()` during
@@ -5804,7 +5814,8 @@ export class OrcaRuntimeService {
     worktreeId: string,
     connectionId: string | null = null,
     binding?: { tabId: string; leafId: string },
-    isWsl?: boolean
+    isWsl?: boolean,
+    trustedWorktreeInstanceId?: string | null
   ): void {
     // Why: record the renderer pane identity at spawn time so a stalled graph
     // sync can't hide that a live PTY already backs a pending mobile create.
@@ -5812,12 +5823,21 @@ export class OrcaRuntimeService {
       binding && isValidTerminalTabId(binding.tabId) && isTerminalLeafId(binding.leafId)
         ? makePaneKey(binding.tabId, binding.leafId)
         : null
-    this.recordPtyWorktree(ptyId, worktreeId, {
+    const hadRecord = this.ptysById.has(ptyId)
+    const pty = this.recordPtyWorktree(ptyId, worktreeId, {
       connected: true,
       connectionId,
       ...(isWsl !== undefined ? { isWsl } : {}),
       ...(binding && paneKey ? { tabId: binding.tabId, paneKey } : {})
     })
+    if (trustedWorktreeInstanceId !== undefined) {
+      pty.worktreeInstanceId = normalizeRuntimeWorktreeInstanceId(trustedWorktreeInstanceId)
+    } else if (!hadRecord) {
+      // Why: direct runtime spawns may bypass IPC; only a newly-created record may bind current meta.
+      pty.worktreeInstanceId = normalizeRuntimeWorktreeInstanceId(
+        this.store?.getWorktreeMeta(worktreeId)?.instanceId
+      )
+    }
     // Why: the renderer's own PTY spawn is the reliable signal that the pending
     // mobile create's tab is live; publish its surface main-side (#7587).
     if (binding && paneKey) {
@@ -13362,8 +13382,13 @@ export class OrcaRuntimeService {
     linkedBitbucketPR?: number | null
     linkedAzureDevOpsPR?: number | null
     linkedGiteaPR?: number | null
+    recordStats?: boolean
+    throwOnProviderError?: boolean
+    signal?: AbortSignal
   }): Promise<HostedReviewInfo | null> {
+    args.signal?.throwIfAborted()
     const repo = await this.resolveRepoSelector(args.repoSelector)
+    args.signal?.throwIfAborted()
     const executionOptions = this.getHostedReviewExecutionOptions(repo)
     const review = await getHostedReviewForBranchFromRepo({
       repoPath: repo.path,
@@ -13376,9 +13401,17 @@ export class OrcaRuntimeService {
       linkedBitbucketPR: args.linkedBitbucketPR ?? null,
       linkedAzureDevOpsPR: args.linkedAzureDevOpsPR ?? null,
       linkedGiteaPR: args.linkedGiteaPR ?? null,
+      ...(args.throwOnProviderError ? { throwOnProviderError: true } : {}),
+      ...(args.signal ? { signal: args.signal } : {}),
       ...executionOptions
     })
-    if (review?.provider === 'github' && this.stats && !this.stats.hasCountedPR(review.url)) {
+    // Why: public Spool reads inspect existing reviews and must not attribute them as newly created.
+    if (
+      args.recordStats !== false &&
+      review?.provider === 'github' &&
+      this.stats &&
+      !this.stats.hasCountedPR(review.url)
+    ) {
       this.stats.record({
         type: 'pr_created',
         at: Date.now(),
@@ -13847,9 +13880,11 @@ export class OrcaRuntimeService {
     prNumber: number,
     headSha?: string,
     prRepo?: GitHubOwnerRepo | null,
-    options?: { noCache?: boolean }
+    options?: { noCache?: boolean; signal?: AbortSignal }
   ): Promise<Awaited<ReturnType<typeof getPRChecks>>> {
+    options?.signal?.throwIfAborted()
     const repo = await this.resolveRepoSelector(repoSelector)
+    options?.signal?.throwIfAborted()
     return getPRChecks(
       repo.path,
       prNumber,
@@ -14644,6 +14679,52 @@ export class OrcaRuntimeService {
 
   async showManagedWorktree(worktreeSelector: string) {
     return await this.resolveWorktreeSelector(worktreeSelector)
+  }
+
+  async resolvePairedRuntimeSpoolWorktree(
+    selector: SpoolPairedRuntimeWorktreeSelector
+  ): Promise<SpoolPairedRuntimeResolvedWorktree> {
+    const store = this.requireStore()
+    const worktree = await this.resolveWorktreeSelector(`id:${selector.worktreeId}`)
+    const repo = store.getRepo(worktree.repoId)
+    const kind = repo && isFolderRepo(repo) ? 'folder' : 'git'
+    if (
+      !repo ||
+      worktree.id !== selector.worktreeId ||
+      worktree.instanceId !== selector.instanceId ||
+      kind !== selector.kind
+    ) {
+      throw new Error('selector_not_found')
+    }
+    const executionHostId = getRepoExecutionHostId(repo)
+    const host = parseExecutionHostId(executionHostId)
+    if (!host || host.kind === 'runtime') {
+      // Why: an internal actual-host call must terminate here, never become a recursive gateway.
+      throw new Error('recursive_runtime_host')
+    }
+    if (worktree.hostId && worktree.hostId !== executionHostId) {
+      throw new Error('worktree_host_mismatch')
+    }
+    return {
+      kind,
+      worktreeId: worktree.id,
+      instanceId: selector.instanceId,
+      projectId: worktree.projectId ?? null,
+      repoId: worktree.repoId,
+      executionHostId,
+      connectionId: host.kind === 'ssh' ? host.targetId : null,
+      ...(worktree.projectHostSetupId ? { projectHostSetupId: worktree.projectHostSetupId } : {}),
+      worktreePath: worktree.path,
+      localWslDistro:
+        host.kind === 'local'
+          ? (getLocalProjectWorktreeGitOptions(store, repo).wslDistro ?? null)
+          : null
+    }
+  }
+
+  getPairedRuntimeSpoolStore(): Store {
+    // Why: only the internal paired-runtime host adapter needs Store-backed path authorization.
+    return this.requireStore()
   }
 
   async scanWorkspacePorts(repoId?: string): Promise<WorkspacePortScanResult> {
@@ -18193,6 +18274,7 @@ export class OrcaRuntimeService {
       return opts
     }
 
+    await opts.beforeAgentTrust?.()
     if (workspace.connectionId) {
       await this.markRemoteWorkspaceTrustedForAgent(agent, workspace.connectionId, workspace.path)
     } else {
@@ -18323,6 +18405,7 @@ export class OrcaRuntimeService {
         tabId,
         agentTeamsPlan?.env
       )
+      await launchOpts.beforeSpawn?.()
       const result = await this.ptyController.spawn({
         cols: 120,
         rows: 40,
@@ -18446,6 +18529,7 @@ export class OrcaRuntimeService {
     // Why: terminal creation is a renderer-side Zustand store operation (like
     // browser tab creation). The main process sends a request, the renderer
     // creates the tab and replies with the tabId so we can resolve the handle.
+    await launchOpts.beforeSpawn?.()
     const reply = await new Promise<{ tabId: string; title: string }>((resolve, reject) => {
       const timer = setTimeout(() => {
         ipcMain.removeListener('terminal:tabCreateReply', handler)
@@ -18521,6 +18605,47 @@ export class OrcaRuntimeService {
       startupCommandDelivery: startup.startup.startupCommandDelivery,
       telemetry: startup.startup.telemetry,
       title: opts.title
+    })
+  }
+
+  async createAgentTerminal(
+    worktreeSelector: string,
+    opts: {
+      agent: TuiAgent
+      title?: string
+      presentation?: RuntimeTerminalPresentation
+      beforeAgentTrust?: () => void | Promise<void>
+      beforeSpawn?: () => void | Promise<void>
+    }
+  ): Promise<RuntimeTerminalCreate> {
+    const workspace = await this.resolveTerminalWorkspaceLaunchScope(worktreeSelector)
+    const repo = workspace.repo
+    if (!repo) {
+      throw new Error('Repository for the selected workspace is no longer available.')
+    }
+    const startup = this.buildStartupForAgent(repo, opts.agent, '')
+    // Why: remote control can be revoked while agent settings and host routing are resolved.
+    await opts.beforeAgentTrust?.()
+    if (workspace.connectionId) {
+      await this.markRemoteWorkspaceTrustedForAgent(
+        opts.agent,
+        workspace.connectionId,
+        workspace.path
+      )
+    } else {
+      this.markLocalWorkspaceTrustedForAgent(opts.agent, workspace.path)
+    }
+    return await this.createTerminal(`id:${workspace.id}`, {
+      command: startup.startup.command,
+      env: startup.startup.env,
+      ...(startup.startup.launchConfig ? { launchConfig: startup.startup.launchConfig } : {}),
+      launchAgent: startup.agent,
+      viewMode: 'chat',
+      startupCommandDelivery: startup.startup.startupCommandDelivery,
+      telemetry: startup.startup.telemetry,
+      title: opts.title,
+      presentation: opts.presentation ?? 'background',
+      beforeSpawn: opts.beforeSpawn
     })
   }
 
@@ -20903,6 +21028,7 @@ export class OrcaRuntimeService {
       pty = {
         ptyId,
         worktreeId,
+        worktreeInstanceId: null,
         connectionId: state.connectionId ?? parseAppSshPtyId(ptyId)?.connectionId ?? null,
         isWsl: state.isWsl ?? null,
         tabId: state.tabId ?? null,
@@ -20942,7 +21068,11 @@ export class OrcaRuntimeService {
       return pty
     }
 
-    pty.worktreeId = worktreeId
+    if (pty.worktreeId !== worktreeId) {
+      pty.worktreeId = worktreeId
+      // Why: path/controller inference can relocate a PTY but cannot attest a new instance.
+      pty.worktreeInstanceId = null
+    }
     if (state.connectionId !== undefined) {
       pty.connectionId = state.connectionId
     }
@@ -21187,6 +21317,9 @@ export class OrcaRuntimeService {
       handle: this.issueHandle(leaf),
       ptyId: leaf.ptyId,
       worktreeId: leaf.worktreeId,
+      worktreeInstanceId: leaf.ptyId
+        ? (this.ptysById.get(leaf.ptyId)?.worktreeInstanceId ?? null)
+        : null,
       worktreePath: worktree?.path ?? '',
       branch: worktree?.branch ?? '',
       tabId: leaf.tabId,
@@ -21680,17 +21813,14 @@ export class OrcaRuntimeService {
           : null
       // Why: web/mobile clients hold these handles across renderer graph syncs;
       // leaf handles are graph-epoch-bound, but PTY handles remain streamable.
-      const terminalHandle = liveLeafPtyId
-        ? this.issuePtyHandle(
-            this.recordPtyWorktree(liveLeafPtyId, snapshot.worktree, {
-              tabId: tab.parentTabId,
-              paneKey,
-              connected: true
-            })
-          )
+      const terminalPty = liveLeafPtyId
+        ? this.recordPtyWorktree(liveLeafPtyId, snapshot.worktree, {
+            tabId: tab.parentTabId,
+            paneKey,
+            connected: true
+          })
         : livePty
-          ? this.issuePtyHandle(livePty)
-          : null
+      const terminalHandle = terminalPty ? this.issuePtyHandle(terminalPty) : null
       tabs.push({
         type: 'terminal',
         id: tab.id,
@@ -21708,7 +21838,11 @@ export class OrcaRuntimeService {
         ...(tab.viewMode ? { viewMode: tab.viewMode } : {}),
         isActive: tab.isActive,
         ...(terminalHandle
-          ? { status: 'ready' as const, terminal: terminalHandle }
+          ? {
+              status: 'ready' as const,
+              terminal: terminalHandle,
+              worktreeInstanceId: terminalPty?.worktreeInstanceId ?? null
+            }
           : { status: 'pending-handle' as const, terminal: null })
       })
     }
@@ -22419,6 +22553,7 @@ export class OrcaRuntimeService {
       handle: this.issuePtyHandle(pty),
       ptyId: pty.ptyId,
       worktreeId: pty.worktreeId,
+      worktreeInstanceId: pty.worktreeInstanceId,
       worktreePath: worktree?.path ?? '',
       branch: worktree?.branch ?? '',
       tabId: `pty:${pty.ptyId}`,
@@ -27750,6 +27885,11 @@ function trimPendingAnsiControl(value: string): string {
   const introducer = value.slice(0, Math.min(2, value.length))
   const suffixBudget = Math.max(0, MAX_TAIL_PENDING_ANSI_CHARS - introducer.length)
   return `${introducer}${value.slice(-suffixBudget)}`
+}
+
+function normalizeRuntimeWorktreeInstanceId(value: string | null | undefined): string | null {
+  const trimmed = value?.trim()
+  return trimmed && trimmed.length <= 512 && !trimmed.includes('\0') ? trimmed : null
 }
 
 function isTerminalPreviewLineControl(parsed: {

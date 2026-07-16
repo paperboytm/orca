@@ -1,12 +1,11 @@
-/* eslint-disable max-lines -- Why: co-locating all checks-panel sub-components (checks list,
-conflict sections, threaded PR comments) keeps the shared icon/color maps in one place. */
+/* eslint-disable max-lines -- Why: legacy checks-panel sub-components for checks, conflicts,
+and threaded PR comments still share tightly coupled selection and composer state. */
 import React, { useCallback, useEffect, useRef, useState } from 'react'
 import {
   CircleCheck,
   CircleX,
   LoaderCircle,
   CircleDashed,
-  CircleMinus,
   GitPullRequest,
   Files,
   Copy,
@@ -99,6 +98,9 @@ import {
 import { translate } from '@/i18n/i18n'
 import { useActiveWorktree } from '@/store/selectors'
 import { useAppStore } from '@/store'
+import { CHECK_COLOR, CHECK_ICON } from './check-status-presentation'
+
+export { CHECK_COLOR, CHECK_ICON } from './check-status-presentation'
 
 export const PullRequestIcon = GitPullRequest
 
@@ -110,28 +112,6 @@ function getPRCommentsListDisplayModeLabel(mode: PRCommentsListDisplayMode): str
   return mode === 'triage'
     ? translate('auto.components.right.sidebar.checks.panel.content.8a621a2c4f', 'Grouped')
     : translate('auto.components.right.sidebar.checks.panel.content.b13f85d75c', 'Timeline')
-}
-
-export const CHECK_ICON: Record<string, React.ComponentType<{ className?: string }>> = {
-  success: CircleCheck,
-  failure: CircleX,
-  pending: LoaderCircle,
-  neutral: CircleDashed,
-  skipped: CircleMinus,
-  cancelled: CircleX,
-  timed_out: CircleX,
-  action_required: AlertTriangle
-}
-
-export const CHECK_COLOR: Record<string, string> = {
-  success: 'text-emerald-500',
-  failure: 'text-rose-500',
-  pending: 'text-amber-500',
-  neutral: 'text-muted-foreground',
-  skipped: 'text-muted-foreground/60',
-  cancelled: 'text-muted-foreground/60',
-  timed_out: 'text-rose-500',
-  action_required: 'text-amber-500'
 }
 
 type ConflictReview = {
@@ -1264,24 +1244,26 @@ export function ChecksList({
                       </span>
                       {openUrl && (
                         <Tooltip>
-                          <TooltipTrigger asChild>
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-xs"
-                              className="size-6 text-muted-foreground hover:text-foreground focus-visible:text-foreground"
-                              aria-label={translate(
-                                'auto.components.right.sidebar.checks.panel.content.0dca6bfab5',
-                                'Open check details'
-                              )}
-                              onClick={(event) => {
-                                event.stopPropagation()
-                                window.api.shell.openUrl(openUrl)
-                              }}
-                            >
-                              <ExternalLink className="size-3" />
-                            </Button>
-                          </TooltipTrigger>
+                          <TooltipTrigger
+                            render={
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-xs"
+                                className="size-6 text-muted-foreground hover:text-foreground focus-visible:text-foreground"
+                                aria-label={translate(
+                                  'auto.components.right.sidebar.checks.panel.content.0dca6bfab5',
+                                  'Open check details'
+                                )}
+                                onClick={(event) => {
+                                  event.stopPropagation()
+                                  window.api.shell.openUrl(openUrl)
+                                }}
+                              >
+                                <ExternalLink className="size-3" />
+                              </Button>
+                            }
+                          />
                           <TooltipContent side="left" sideOffset={4}>
                             {translate(
                               'auto.components.right.sidebar.checks.panel.content.0dca6bfab5',
@@ -1502,23 +1484,28 @@ function CommentMoreMenu({
 
   return (
     <DropdownMenu modal={false}>
-      <DropdownMenuTrigger asChild>
-        <button
-          type="button"
-          className="shrink-0 rounded p-1 text-muted-foreground/40 transition-colors hover:bg-accent hover:text-foreground"
-          aria-label={translate(
-            'auto.components.right.sidebar.checks.panel.content.74c6885b8a',
-            'More comment actions'
-          )}
-          title={translate('auto.components.right.sidebar.checks.panel.content.1abb17aac9', 'More')}
-          onClick={(event) => event.stopPropagation()}
-        >
-          <MoreHorizontal className="size-3" />
-        </button>
-      </DropdownMenuTrigger>
+      <DropdownMenuTrigger
+        render={
+          <button
+            type="button"
+            className="shrink-0 rounded p-1 text-muted-foreground/40 transition-colors hover:bg-accent hover:text-foreground"
+            aria-label={translate(
+              'auto.components.right.sidebar.checks.panel.content.74c6885b8a',
+              'More comment actions'
+            )}
+            title={translate(
+              'auto.components.right.sidebar.checks.panel.content.1abb17aac9',
+              'More'
+            )}
+            onClick={(event) => event.stopPropagation()}
+          >
+            <MoreHorizontal className="size-3" />
+          </button>
+        }
+      />
       <DropdownMenuContent align="end" sideOffset={4}>
         {hasQueue ? (
-          <DropdownMenuItem onSelect={() => onQueueForAgent?.()}>
+          <DropdownMenuItem onClick={() => onQueueForAgent?.()}>
             <Sparkles />
             {translate(
               'auto.components.right.sidebar.checks.panel.content.f8a2c91d04',
@@ -1528,7 +1515,7 @@ function CommentMoreMenu({
         ) : null}
         {hasQueue && (hasGoToComment || hasEdit || hasDelete) ? <DropdownMenuSeparator /> : null}
         {hasGoToComment && (
-          <DropdownMenuItem onSelect={() => window.api.shell.openUrl(comment.url)}>
+          <DropdownMenuItem onClick={() => window.api.shell.openUrl(comment.url)}>
             <ExternalLink />
             {translate(
               'auto.components.right.sidebar.checks.panel.content.d3923d18fe',
@@ -1539,17 +1526,18 @@ function CommentMoreMenu({
         {hasGoToComment && (hasEdit || hasDelete) ? <DropdownMenuSeparator /> : null}
         {hasEdit ? (
           <DropdownMenuItem
-            onSelect={(event) => {
+            onClick={(event) => {
               event.preventDefault()
               onStartEdit?.()
             }}
+            closeOnClick={false}
           >
             <Pencil />
             {translate('auto.components.right.sidebar.checks.panel.content.03ca88f623', 'Edit')}
           </DropdownMenuItem>
         ) : null}
         {hasDelete ? (
-          <DropdownMenuItem variant="destructive" onSelect={() => void onDelete?.()}>
+          <DropdownMenuItem variant="destructive" onClick={() => void onDelete?.()}>
             <Trash />
             {translate('auto.components.right.sidebar.checks.panel.content.6cc6eace26', 'Delete')}
           </DropdownMenuItem>
@@ -1558,7 +1546,7 @@ function CommentMoreMenu({
           <>
             {(hasQueue || hasGoToComment || hasEdit || hasDelete) && <DropdownMenuSeparator />}
             <DropdownMenuItem
-              onSelect={() => setPRBotAuthorOverride(comment.author, !isOverriddenBot)}
+              onClick={() => setPRBotAuthorOverride(comment.author, !isOverriddenBot)}
             >
               <Bot />
               {isOverriddenBot
@@ -2077,9 +2065,9 @@ function PRCommentGroupView({
 
   return (
     <ContextMenu>
-      <ContextMenuTrigger asChild>{content}</ContextMenuTrigger>
+      <ContextMenuTrigger render={content} />
       <ContextMenuContent>
-        <ContextMenuItem onSelect={() => onQueueForAgent()}>
+        <ContextMenuItem onClick={() => onQueueForAgent()}>
           <Sparkles />
           {translate(
             'auto.components.right.sidebar.checks.panel.content.f8a2c91d04',
@@ -2123,7 +2111,7 @@ function ResolvedCommentGroupsSection({
   }
   return (
     <div className={presentation.resolvedSection}>
-      <Accordion type="single" collapsible>
+      <Accordion>
         <AccordionItem value="resolved-all" className="border-b-0">
           <AccordionTrigger className={presentation.resolvedSectionTrigger}>
             <span className="min-w-0 truncate">
@@ -2421,28 +2409,30 @@ export function PRCommentsList({
             {canShowResolveWithAI && (
               <>
                 <Tooltip>
-                  <TooltipTrigger asChild>
-                    <Button
-                      type="button"
-                      variant="ghost"
-                      size="icon-xs"
-                      className="text-muted-foreground hover:text-foreground"
-                      aria-label={translate(
-                        'auto.components.right.sidebar.checks.panel.content.d7a2f9c401',
-                        'Send unresolved {{value0}} comments',
-                        { value0: reviewKind }
-                      )}
-                      disabled={commentsLoading || resolveCommentsWithAIDisabled}
-                      title={
-                        resolveCommentsWithAIDisabled
-                          ? resolveCommentsWithAIDisabledReason
-                          : undefined
-                      }
-                      onClick={() => onResolveSelectedCommentsWithAI?.(selectableGroups)}
-                    >
-                      <Sparkles className="size-3" />
-                    </Button>
-                  </TooltipTrigger>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        type="button"
+                        variant="ghost"
+                        size="icon-xs"
+                        className="text-muted-foreground hover:text-foreground"
+                        aria-label={translate(
+                          'auto.components.right.sidebar.checks.panel.content.d7a2f9c401',
+                          'Send unresolved {{value0}} comments',
+                          { value0: reviewKind }
+                        )}
+                        disabled={commentsLoading || resolveCommentsWithAIDisabled}
+                        title={
+                          resolveCommentsWithAIDisabled
+                            ? resolveCommentsWithAIDisabledReason
+                            : undefined
+                        }
+                        onClick={() => onResolveSelectedCommentsWithAI?.(selectableGroups)}
+                      >
+                        <Sparkles className="size-3" />
+                      </Button>
+                    }
+                  />
                   <TooltipContent side="top" sideOffset={4}>
                     {resolveCommentsWithAIDisabled && resolveCommentsWithAIDisabledReason
                       ? resolveCommentsWithAIDisabledReason
@@ -2456,35 +2446,37 @@ export function PRCommentsList({
                 {isSelectingForAI && (
                   <>
                     <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="default"
-                          size="icon-xs"
-                          className="relative"
-                          aria-label={translate(
-                            'auto.components.right.sidebar.checks.panel.content.d91f2a6c39',
-                            'Send {{value0}} queued comments to AI',
-                            { value0: selectedCommentQueueCount }
-                          )}
-                          disabled={
-                            selectedCommentQueueCount === 0 ||
-                            commentsLoading ||
-                            resolveCommentsWithAIDisabled
-                          }
-                          title={
-                            resolveCommentsWithAIDisabled
-                              ? resolveCommentsWithAIDisabledReason
-                              : undefined
-                          }
-                          onClick={() => onResolveSelectedCommentsWithAI?.(selectedGroups)}
-                        >
-                          <SendHorizontal className="size-3" />
-                          <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-border bg-background px-0.5 text-[9px] leading-none text-foreground tabular-nums">
-                            {selectedCommentQueueCount}
-                          </span>
-                        </Button>
-                      </TooltipTrigger>
+                      <TooltipTrigger
+                        render={
+                          <Button
+                            type="button"
+                            variant="default"
+                            size="icon-xs"
+                            className="relative"
+                            aria-label={translate(
+                              'auto.components.right.sidebar.checks.panel.content.d91f2a6c39',
+                              'Send {{value0}} queued comments to AI',
+                              { value0: selectedCommentQueueCount }
+                            )}
+                            disabled={
+                              selectedCommentQueueCount === 0 ||
+                              commentsLoading ||
+                              resolveCommentsWithAIDisabled
+                            }
+                            title={
+                              resolveCommentsWithAIDisabled
+                                ? resolveCommentsWithAIDisabledReason
+                                : undefined
+                            }
+                            onClick={() => onResolveSelectedCommentsWithAI?.(selectedGroups)}
+                          >
+                            <SendHorizontal className="size-3" />
+                            <span className="absolute -right-1 -top-1 flex h-3.5 min-w-3.5 items-center justify-center rounded-full border border-border bg-background px-0.5 text-[9px] leading-none text-foreground tabular-nums">
+                              {selectedCommentQueueCount}
+                            </span>
+                          </Button>
+                        }
+                      />
                       <TooltipContent side="top" sideOffset={4}>
                         {resolveCommentsWithAIDisabled && resolveCommentsWithAIDisabledReason
                           ? resolveCommentsWithAIDisabledReason
@@ -2496,21 +2488,23 @@ export function PRCommentsList({
                       </TooltipContent>
                     </Tooltip>
                     <Tooltip>
-                      <TooltipTrigger asChild>
-                        <Button
-                          type="button"
-                          variant="ghost"
-                          size="icon-xs"
-                          className="text-muted-foreground hover:text-foreground"
-                          aria-label={translate(
-                            'auto.components.right.sidebar.checks.panel.content.a6de3e5a20',
-                            'Clear queued comments'
-                          )}
-                          onClick={clearSelection}
-                        >
-                          <X className="size-3" />
-                        </Button>
-                      </TooltipTrigger>
+                      <TooltipTrigger
+                        render={
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-xs"
+                            className="text-muted-foreground hover:text-foreground"
+                            aria-label={translate(
+                              'auto.components.right.sidebar.checks.panel.content.a6de3e5a20',
+                              'Clear queued comments'
+                            )}
+                            onClick={clearSelection}
+                          >
+                            <X className="size-3" />
+                          </Button>
+                        }
+                      />
                       <TooltipContent side="top" sideOffset={4}>
                         {translate(
                           'auto.components.right.sidebar.checks.panel.content.a6de3e5a20',
@@ -2524,20 +2518,22 @@ export function PRCommentsList({
             )}
             {comments.length > 0 && (
               <DropdownMenu>
-                <DropdownMenuTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    className="text-muted-foreground hover:text-foreground"
-                    aria-label={translate(
-                      'auto.components.right.sidebar.checks.panel.content.f5cf324efa',
-                      'Comment display options'
-                    )}
-                  >
-                    <SlidersHorizontal className="size-3" />
-                  </Button>
-                </DropdownMenuTrigger>
+                <DropdownMenuTrigger
+                  render={
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      className="text-muted-foreground hover:text-foreground"
+                      aria-label={translate(
+                        'auto.components.right.sidebar.checks.panel.content.f5cf324efa',
+                        'Comment display options'
+                      )}
+                    >
+                      <SlidersHorizontal className="size-3" />
+                    </Button>
+                  }
+                />
                 <DropdownMenuContent align="end" side="bottom" sideOffset={6}>
                   <DropdownMenuLabel>
                     {translate(
@@ -2560,30 +2556,32 @@ export function PRCommentsList({
             )}
             {onAddComment && !isAddingComment && (
               <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button
-                    type="button"
-                    variant="ghost"
-                    size="icon-xs"
-                    aria-label={
-                      comments.length === 0
-                        ? translate(
-                            'auto.components.right.sidebar.checks.panel.content.7440d09d2c',
-                            'Start conversation'
-                          )
-                        : translate(
-                            'auto.components.right.sidebar.checks.panel.content.2b2be92919',
-                            'Add comment'
-                          )
-                    }
-                    disabled={commentsDisabled}
-                    title={commentsDisabled ? commentsDisabledReason : undefined}
-                    className="text-muted-foreground hover:text-foreground"
-                    onClick={startAddComment}
-                  >
-                    <Plus className="size-3" />
-                  </Button>
-                </TooltipTrigger>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      size="icon-xs"
+                      aria-label={
+                        comments.length === 0
+                          ? translate(
+                              'auto.components.right.sidebar.checks.panel.content.7440d09d2c',
+                              'Start conversation'
+                            )
+                          : translate(
+                              'auto.components.right.sidebar.checks.panel.content.2b2be92919',
+                              'Add comment'
+                            )
+                      }
+                      disabled={commentsDisabled}
+                      title={commentsDisabled ? commentsDisabledReason : undefined}
+                      className="text-muted-foreground hover:text-foreground"
+                      onClick={startAddComment}
+                    >
+                      <Plus className="size-3" />
+                    </Button>
+                  }
+                />
                 <TooltipContent side="top" sideOffset={4}>
                   {commentsDisabled && commentsDisabledReason
                     ? commentsDisabledReason

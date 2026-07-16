@@ -12,6 +12,9 @@ export type SharedControlPendingRequest<TResult> = {
   resolve: (response: RuntimeRpcResponse<TResult>) => void
   reject: (error: Error) => void
   timeout: ReturnType<typeof setTimeout>
+  signal?: AbortSignal
+  abortListener?: () => void
+  sent: boolean
   // Why: keepalives on the shared socket are armed for an unrelated long-poll,
   // not this request. Only requests that opt in (long-polls issued via the
   // short-RPC path) may have their deadline refreshed by a keepalive; ordinary
@@ -36,6 +39,9 @@ export type SharedControlLogicalSubscription<TResult = unknown> = {
   closed: boolean
   closeAfterReady: boolean
   remoteSubscriptionId: string | null
+  // Why: borrowed callers may use an already-online route but must not keep it alive
+  // or regain access when the owner connection later reconnects.
+  replayOnReconnect: boolean
   // Why: set while awaiting the first response after a reconnect replay; that
   // response is the authoritative re-emitted snapshot and gets tagged so
   // monotonic freshness gates don't drop it (#7718).

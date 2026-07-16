@@ -3,6 +3,8 @@ import type { PairingOffer } from './pairing'
 import type { RuntimeRpcResponse } from './runtime-rpc-envelope'
 import type { RemoteRuntimeClientError } from './remote-runtime-client-error'
 import { remoteRuntimeUnavailableError } from './remote-runtime-request-frames'
+import { REMOTE_RUNTIME_CANCEL_REQUEST_METHOD } from './remote-runtime-request-cancellation'
+import { RemoteRuntimeExistingRouteAccess } from './remote-runtime-existing-route-access'
 import { openSharedControlSocket } from './remote-runtime-shared-control-open'
 import { handleSharedControlTextFrame } from './remote-runtime-shared-control-frame-handler'
 import { sendSharedControlEncrypted } from './remote-runtime-shared-control-protocol'
@@ -14,10 +16,7 @@ import { scheduleSharedControlReconnectOrFinish } from './remote-runtime-shared-
 import { requestSharedControl } from './remote-runtime-shared-control-requests'
 import { SharedControlReadyStableResetTimer } from './remote-runtime-shared-control-stability'
 import * as sharedControlState from './remote-runtime-shared-control-state'
-import {
-  sendSharedControlRequest,
-  sendSharedControlSubscription
-} from './remote-runtime-shared-control-send'
+import { RemoteRuntimeSharedControlSender } from './remote-runtime-shared-control-sender'
 import { closeSharedControlSocket } from './remote-runtime-shared-control-socket-close'
 import type { RemoteRuntimeSocketLivenessOptions } from './remote-runtime-socket-liveness'
 import * as sharedControlSubscriptions from './remote-runtime-shared-control-subscriptions'
@@ -48,6 +47,9 @@ export class RemoteRuntimeSharedControlConnection {
   private readonly subscriptions = new Map<string, SharedControlLogicalSubscription<unknown>>()
   private readonly readyWaiters: SharedControlReadyWaiter[] = []
   private everReady = false
+  private routeGeneration = 0
+  private readonly sender: RemoteRuntimeSharedControlSender
+  readonly existingRoute: RemoteRuntimeExistingRouteAccess
 
   constructor(
     private readonly pairing: PairingOffer,
@@ -60,12 +62,27 @@ export class RemoteRuntimeSharedControlConnection {
     this.readyStableReset = new SharedControlReadyStableResetTimer(
       options.reconnectStableResetMs ?? 30_000
     )
+    this.sender = new RemoteRuntimeSharedControlSender({
+      deviceToken: pairing.deviceToken,
+      pendingRequests: this.pendingRequests,
+      subscriptions: this.subscriptions,
+      sendEncrypted: (payload) => this.sendEncrypted(payload)
+    })
+    this.existingRoute = new RemoteRuntimeExistingRouteAccess({
+      deviceToken: pairing.deviceToken,
+      pendingRequests: this.pendingRequests,
+      subscriptions: this.subscriptions,
+      readyRouteGeneration: () => this.readyRouteGeneration(),
+      sendEncrypted: (payload) => this.sendEncrypted(payload),
+      closeSubscription: (requestId) => this.closeSubscription(requestId)
+    })
   }
 
   request<TResult>(
     method: string,
     params: unknown,
-    timeoutMs: number
+    timeoutMs: number,
+    options: { beforeSend?: () => void | Promise<void>; signal?: AbortSignal } = {}
   ): Promise<RuntimeRpcResponse<TResult>> {
     return requestSharedControl({
       pendingRequests: this.pendingRequests,
@@ -73,8 +90,10 @@ export class RemoteRuntimeSharedControlConnection {
       params,
       timeoutMs,
       ensureReady: () => this.ensureReadyWithTimeout(timeoutMs),
-      send: (requestId, requestMethod, requestParams) =>
-        this.sendRequest(requestId, requestMethod, requestParams),
+      beforeSend: options.beforeSend,
+      signal: options.signal,
+      send: (id, name, input) => this.sender.request(id, name, input),
+      cancel: (id) => this.sender.cleanup(REMOTE_RUNTIME_CANCEL_REQUEST_METHOD, { requestId: id }),
       // Why: a timed-out request marks the socket as suspect (#7718) — tear
       // it down so reconnect+replay runs instead of keeping a zombie socket.
       onTimeout: (error) => this.handleSocketClosed(error)
@@ -93,7 +112,7 @@ export class RemoteRuntimeSharedControlConnection {
       params,
       callbacks,
       ensureReady: () => this.ensureReadyWithTimeout(timeoutMs),
-      sendSubscription: (subscription) => this.sendSubscription(subscription),
+      sendSubscription: (subscription) => this.sender.subscription(subscription),
       closeSubscription: (requestId) => this.closeSubscription(requestId)
     })
   }
@@ -172,6 +191,7 @@ export class RemoteRuntimeSharedControlConnection {
     this.sharedKey = opened.socket.sharedKey
     this.socketCleanup = opened.socket.cleanup
     this.state = 'awaiting_ready'
+    this.routeGeneration += 1
   }
 
   private handleTextFrame(frame: string): void {
@@ -184,9 +204,7 @@ export class RemoteRuntimeSharedControlConnection {
       pendingRequests: this.pendingRequests,
       subscriptions: this.subscriptions,
       readyWaiters: this.readyWaiters,
-      setState: (state) => {
-        this.state = state
-      },
+      setState: (state) => void (this.state = state),
       handleSocketClosed: (error) => this.handleSocketClosed(error),
       sendEncrypted: (payload) => this.sendEncrypted(payload),
       markReady: () => {
@@ -197,32 +215,10 @@ export class RemoteRuntimeSharedControlConnection {
     })
   }
 
-  private sendRequest(requestId: string, method: string, params: unknown): void {
-    sendSharedControlRequest({
-      pendingRequests: this.pendingRequests,
-      requestId,
-      deviceToken: this.pairing.deviceToken,
-      method,
-      params,
-      send: (payload) => this.sendEncrypted(payload),
-      reject: (id, error) =>
-        sharedControlState.rejectSharedControlPendingRequest(this.pendingRequests, id, error)
-    })
-  }
-
-  private sendSubscription(subscription: SharedControlLogicalSubscription<unknown>): void {
-    sendSharedControlSubscription({
-      subscriptions: this.subscriptions,
-      subscription,
-      deviceToken: this.pairing.deviceToken,
-      send: (payload) => this.sendEncrypted(payload)
-    })
-  }
-
   private replaySubscriptions(): void {
     sharedControlSubscriptions.replaySharedControlSubscriptions({
       subscriptions: this.subscriptions,
-      send: (subscription) => this.sendSubscription(subscription),
+      send: (subscription) => this.sender.subscription(subscription),
       // Why: only reconnects tag replays; first connects stay on the gated path.
       tagReplayedResponses: this.everReady
     })
@@ -237,7 +233,7 @@ export class RemoteRuntimeSharedControlConnection {
     sharedControlSubscriptions.closeSharedControlLogicalSubscription({
       subscriptions: this.subscriptions,
       subscription,
-      request: (method, params) => this.sendSubscriptionCleanupRequest(method, params)
+      request: (method, params) => this.sender.cleanup(method, params)
     })
   }
 
@@ -250,13 +246,10 @@ export class RemoteRuntimeSharedControlConnection {
     })
   }
 
-  private sendSubscriptionCleanupRequest(method: string, params: unknown): void {
-    sharedControlSubscriptions.sendSharedControlCleanupRequest({
-      deviceToken: this.pairing.deviceToken,
-      method,
-      params,
-      send: (payload) => this.sendEncrypted(payload)
-    })
+  private readyRouteGeneration(): number | null {
+    return isSharedControlReady({ state: this.state, ws: this.ws, sharedKey: this.sharedKey })
+      ? this.routeGeneration
+      : null
   }
 
   private handleSocketClosed(error: RemoteRuntimeClientError): void {
@@ -270,6 +263,8 @@ export class RemoteRuntimeSharedControlConnection {
   private closeSocket(error?: Error): void {
     const cleanup = this.socketCleanup
     const ws = this.ws
+    // Why: borrowed requests are bound to one physical route and cannot cross a reconnect.
+    this.routeGeneration += 1
     closeSharedControlSocket({
       environmentId: this.options.environmentId,
       state: this.state,
@@ -315,9 +310,7 @@ export class RemoteRuntimeSharedControlConnection {
     this.readyStableReset.schedule({
       getState: () => this.state,
       getSocket: () => this.ws,
-      reset: () => {
-        this.reconnectAttempt = 0
-      }
+      reset: () => void (this.reconnectAttempt = 0)
     })
   }
 }
